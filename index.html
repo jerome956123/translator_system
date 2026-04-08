@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>雙語口譯系統</title>
+    <title>多國語言口譯系統</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -47,10 +47,22 @@
 
         const MODEL_NAME = "gemini-3-flash-preview"; 
 
+        // 定義支援的語言列表
+        const SUPPORTED_LANGUAGES = {
+            ja: { name: "日本語", promptName: "Japanese", sttLang: "ja-JP", ttsLang: "ja-JP", instruction: "長押しで話す" },
+            en: { name: "English", promptName: "English", sttLang: "en-US", ttsLang: "en-US", instruction: "Hold to speak" },
+            ko: { name: "한국어", promptName: "Korean", sttLang: "ko-KR", ttsLang: "ko-KR", instruction: "길게 눌러 말하기" },
+            de: { name: "Deutsch", promptName: "German", sttLang: "de-DE", ttsLang: "de-DE", instruction: "Zum Sprechen halten" },
+            fr: { name: "Français", promptName: "French", sttLang: "fr-FR", ttsLang: "fr-FR", instruction: "Maintenez pour parler" }
+        };
+
         function App() {
             const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
             const [inputKey, setInputKey] = useState('');
             const [isConfigured, setIsConfigured] = useState(!!localStorage.getItem('gemini_api_key'));
+
+            // 新增：目標語言狀態，預設為日文 (ja)
+            const [targetLang, setTargetLang] = useState('ja');
 
             const saveApiKey = () => {
                 if (inputKey.trim()) {
@@ -128,10 +140,13 @@
                 });
             };
 
+            // 翻譯提示詞更新，使用動態選擇的語言
             const translateTextWithGemini = async (text, sourceLang) => {
-                const targetLang = sourceLang === 'zh' ? 'Japanese' : 'Traditional Chinese';
-                const sourceLangName = sourceLang === 'zh' ? 'Traditional Chinese' : 'Japanese';
-                const systemPrompt = `You are a professional real-time interpreter. Translate the following ${sourceLangName} text to ${targetLang}. Output ONLY the translated text. No explanations.`;
+                const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
+                const destLangName = sourceLang === 'zh' ? selectedLangConfig.promptName : 'Traditional Chinese';
+                const sourceLangName = sourceLang === 'zh' ? 'Traditional Chinese' : selectedLangConfig.promptName;
+                
+                const systemPrompt = `You are a professional real-time interpreter. Translate the following ${sourceLangName} text to ${destLangName}. Output ONLY the translated text. No explanations.`;
 
                 const delays = [1000, 2000, 4000, 8000];
                 for (let attempt = 0; attempt <= 4; attempt++) {
@@ -151,13 +166,15 @@
                 }
             };
 
-            
+            // 音訊提示詞更新，使用動態選擇的語言
             const processAudioWithGemini = async (audioBase64, mode, messageId) => {
-                const sourceLang = mode === 'user' ? 'Mandarin Chinese' : 'Japanese';
-                const targetLang = mode === 'user' ? 'Japanese' : 'Traditional Chinese';
-                const transcribeInstruction = mode === 'user' ? "Transcribe exactly in Traditional Chinese (繁體中文)." : "Transcribe exactly.";
+                const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
+                const sourceLangName = mode === 'user' ? 'Mandarin Chinese' : selectedLangConfig.promptName;
+                const destLangName = mode === 'user' ? selectedLangConfig.promptName : 'Traditional Chinese';
                 
-                const systemPrompt = `You are a simultaneous interpreter.\n1. Listen to the audio (${sourceLang}).\n2. ${transcribeInstruction}\n3. Translate to ${targetLang}.\nOutput strictly in valid JSON format with only two keys: "transcription" and "translation". Do not include markdown code blocks.`;
+                const transcribeInstruction = mode === 'user' ? "Transcribe exactly in Traditional Chinese (繁體中文)." : `Transcribe exactly in ${selectedLangConfig.promptName}.`;
+                
+                const systemPrompt = `You are a simultaneous interpreter.\n1. Listen to the audio (${sourceLangName}).\n2. ${transcribeInstruction}\n3. Translate to ${destLangName}.\nOutput strictly in valid JSON format with only two keys: "transcription" and "translation". Do not include markdown code blocks.`;
 
                 const delays = [1000, 2000, 4000, 8000];
                 for (let attempt = 0; attempt <= 4; attempt++) {
@@ -180,13 +197,10 @@
                         let translationText = "";
 
                         try {
-                            // 1. 嘗試乖乖解析 JSON 格式
                             const result = JSON.parse(cleanText);
                             translationText = result.translation || result.translated || result.Translation || "[翻譯欄位空白]";
                             originalText = result.transcription || result.original || result.text || "[原文欄位空白]";
                         } catch (parseError) {
-                            // 2. 【終極救援機制】如果 AI 沒給 JSON 導致解析壞掉
-                            // 我們絕對不丟掉資訊，直接把 AI 的原始回覆 (生肉) 印在畫面上！
                             console.warn("JSON 解析失敗，啟用生肉救援模式");
                             originalText = "⚠️ AI 未按格式回覆，以下為原始內容：";
                             translationText = rawText || "[AI 毫無回應]"; 
@@ -198,7 +212,6 @@
                         if (attempt < 4) {
                             await new Promise(resolve => setTimeout(resolve, delays[attempt]));
                         } else {
-                            // 這是最糟的狀況：網路徹底斷線，連 Google 伺服器都連不上
                             return { original: "[網路連線徹底失敗]", translation: "請檢查網路狀態或金鑰" };
                         }
                     }
@@ -212,7 +225,11 @@
                 if (recognitionRef.current) recognitionRef.current.stop();
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 const recognition = new SpeechRecognition();
-                recognition.lang = mode === 'user' ? 'cmn-Hant-TW' : 'ja-JP';
+                
+                // 動態設定語音辨識的語言
+                const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
+                recognition.lang = mode === 'user' ? 'cmn-Hant-TW' : selectedLangConfig.sttLang;
+                
                 recognition.continuous = true;
                 recognition.interimResults = true;
 
@@ -242,7 +259,9 @@
                         const newMsgId = Date.now();
                         const sender = mode === 'user' ? 'me' : 'partner';
                         setMessages(prev => [...prev, { id: newMsgId, text: finalTranscript, translation: "翻譯中...", sender: sender, loading: true, mode: 'stream' }]);
-                        const translation = await translateTextWithGemini(finalTranscript, mode === 'user' ? 'zh' : 'ja');
+                        // 修正：動態傳遞第二個參數
+                        const sourceLangCode = mode === 'user' ? 'zh' : targetLang;
+                        const translation = await translateTextWithGemini(finalTranscript, sourceLangCode);
                         setMessages(prev => prev.map(msg => msg.id === newMsgId ? { ...msg, translation: translation, loading: false } : msg));
                         setInterimText("");
                     }
@@ -355,19 +374,42 @@
                 );
             }
 
+            const currentPartnerLangConfig = SUPPORTED_LANGUAGES[targetLang];
+
             return (
                 <div className="flex flex-col h-screen max-w-md mx-auto bg-slate-900 border-x border-slate-800 shadow-2xl overflow-hidden relative">
                     <header className="bg-slate-800 p-4 shadow-md z-10 flex justify-between items-center border-b border-slate-700 relative">
                         <div className="flex items-center gap-2">
                             <i className="fa-solid fa-language text-blue-400 text-xl"></i>
-                            <h1 className="font-bold text-lg text-white whitespace-nowrap">雙語口譯</h1>
-                            <span className="text-[10px] bg-slate-700/50 text-slate-300 px-2 py-0.5 rounded-full border border-slate-600 ml-1">
-                                {MODEL_NAME}
+                            <h1 className="font-bold text-lg text-white whitespace-nowrap">口譯系統</h1>
+                            <span className="text-[10px] bg-slate-700/50 text-slate-300 px-2 py-0.5 rounded-full border border-slate-600 ml-1 truncate max-w-[80px]" title={MODEL_NAME}>
+                                {MODEL_NAME.replace('gemini-', '')}
                             </span>
                         </div>
-                        <button onClick={resetApiKey} className="text-slate-500 hover:text-slate-300 text-sm" title="重設 API Key">
-                            <i className="fa-solid fa-gear"></i>
-                        </button>
+                        
+                        <div className="flex items-center gap-3">
+                            {/* 新增：語言切換下拉選單 */}
+                            <div className="relative">
+                                <select 
+                                    value={targetLang} 
+                                    onChange={(e) => setTargetLang(e.target.value)}
+                                    className="appearance-none bg-slate-700 text-white text-sm py-1 pl-3 pr-8 rounded border border-slate-600 focus:outline-none focus:border-blue-500"
+                                >
+                                    <option value="ja">日本語</option>
+                                    <option value="en">English</option>
+                                    <option value="ko">한국어</option>
+                                    <option value="de">Deutsch</option>
+                                    <option value="fr">Français</option>
+                                </select>
+                                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-300">
+                                    <i className="fa-solid fa-chevron-down text-xs"></i>
+                                </div>
+                            </div>
+
+                            <button onClick={resetApiKey} className="text-slate-400 hover:text-slate-200 text-sm transition-colors" title="重設 API Key">
+                                <i className="fa-solid fa-gear"></i>
+                            </button>
+                        </div>
                     </header>
 
                     <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-900 pb-8">
@@ -382,9 +424,9 @@
                             <div key={msg.id} className={`flex flex-col ${msg.sender === 'me' ? 'items-end' : 'items-start'} message-enter`}>
                                 <div className={`max-w-[85%] rounded-2xl p-4 shadow-lg border relative ${msg.sender === 'me' ? 'bg-blue-600/20 border-blue-500/30 text-blue-100 rounded-br-none' : 'bg-emerald-600/20 border-emerald-500/30 text-emerald-100 rounded-bl-none'}`}>
                                     <span className="absolute top-2 right-2 text-[10px] opacity-40 uppercase tracking-wider border border-white/20 px-1 rounded">{msg.mode === 'stream' ? 'Live' : 'Audio'}</span>
-                                    <p className="text-sm opacity-70 mb-1 font-light">{msg.sender === 'me' ? '我 (中文)' : '對方 (日文)'}</p>
+                                    <p className="text-sm opacity-70 mb-1 font-light">{msg.sender === 'me' ? '我 (中文)' : `對方 (${currentPartnerLangConfig.name})`}</p>
                                     {msg.loading && msg.mode === 'record' ? (
-                                        <div className="flex items-center gap-2 mb-2 text-slate-300"><i className="fa-solid fa-circle-notch fa-spin"></i><span className="text-lg italic opacity-70">音訊上傳處理中...</span></div>
+                                        <div className="flex items-center gap-2 mb-2 text-slate-300"><i className="fa-solid fa-circle-notch fa-spin"></i><span className="text-lg italic opacity-70">處理中...</span></div>
                                     ) : (<p className="text-lg mb-2 leading-snug">{msg.text}</p>)}
                                     <div className={`h-px w-full my-2 ${msg.sender === 'me' ? 'bg-blue-500/30' : 'bg-emerald-500/30'}`}></div>
                                     <div className="flex items-start gap-3 justify-between">
@@ -393,7 +435,10 @@
                                             <p className={`font-bold text-xl tracking-wide ${msg.loading ? 'animate-pulse text-slate-400' : 'text-white'}`}>{msg.translation}</p>
                                         </div>
                                         {!msg.loading && (
-                                            <button onClick={() => speakText(msg.translation, msg.sender === 'me' ? 'ja-JP' : 'zh-TW', msg.id)} className={`p-2 rounded-full transition-colors flex-shrink-0 mt-[-4px] ${speakingId === msg.id ? 'bg-white text-slate-900 animate-pulse' : 'text-white/40 hover:text-white hover:bg-white/10'}`}>
+                                            <button 
+                                                onClick={() => speakText(msg.translation, msg.sender === 'me' ? currentPartnerLangConfig.ttsLang : 'zh-TW', msg.id)} 
+                                                className={`p-2 rounded-full transition-colors flex-shrink-0 mt-[-4px] ${speakingId === msg.id ? 'bg-white text-slate-900 animate-pulse' : 'text-white/40 hover:text-white hover:bg-white/10'}`}
+                                            >
                                                 <i className={`fa-solid ${speakingId === msg.id ? 'fa-volume-high' : 'fa-volume-low'}`}></i>
                                             </button>
                                         )}
@@ -433,11 +478,10 @@
                             </button>
                             <button {...getButtonEvents('partner')} disabled={activeMode === 'user'} className={`relative overflow-hidden rounded-xl p-4 flex flex-col items-center justify-center transition-all duration-100 select-none ${activeMode === 'partner' ? (appMode === 'stream' ? 'bg-emerald-600 shadow-[0_0_15px_rgba(5,150,105,0.6)] scale-95' : 'bg-red-500 animate-pulse scale-95') : activeMode === 'user' ? 'bg-slate-700 opacity-30 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-slate-200 active:bg-slate-600'} text-white touch-none`}>
                                 <div className={`text-2xl mb-2 ${activeMode === 'partner' && appMode === 'stream' ? 'mic-wave' : ''}`}><i className={`fa-solid ${activeMode === 'partner' && appMode === 'record' ? 'fa-stop' : 'fa-ear-listen'}`}></i></div>
-                                <span className="font-bold text-sm flex flex-col items-center leading-tight">{activeMode === 'partner' && appMode === 'record' ? (isPushToTalk ? '放開傳送' : '停止並傳送') : (isPushToTalk ? <><span className="text-base mb-1">日本語</span><span className="text-[10px] font-normal opacity-80">(長押しで話す)</span></> : '日本語')}</span>
+                                <span className="font-bold text-sm flex flex-col items-center leading-tight">{activeMode === 'partner' && appMode === 'record' ? (isPushToTalk ? '放開傳送' : '停止並傳送') : (isPushToTalk ? <><span className="text-base mb-1">{currentPartnerLangConfig.name}</span><span className="text-[10px] font-normal opacity-80">({currentPartnerLangConfig.instruction})</span></> : currentPartnerLangConfig.name)}</span>
                             </button>
                         </div>
                         
-                        {/* 【升級】：無縫接力按鈕 (精簡圖示版) */}
                         {activeMode !== null && !isPushToTalk && (
                             <div className="mt-4 flex justify-center animate-slideIn">
                                 <button 
