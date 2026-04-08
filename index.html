@@ -151,6 +151,7 @@
                 }
             };
 
+            
             const processAudioWithGemini = async (audioBase64, mode, messageId) => {
                 const sourceLang = mode === 'user' ? 'Mandarin Chinese' : 'Japanese';
                 const targetLang = mode === 'user' ? 'Japanese' : 'Traditional Chinese';
@@ -172,18 +173,34 @@
                         const data = await response.json();
                         if (data.error) throw new Error(data.error.message);
                         
-                        let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-                        rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+                        let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+                        let cleanText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
                         
-                        const result = JSON.parse(rawText);
-                        
-                        const translationText = result.translation || result.translated || result.Translation || "[翻譯失敗]";
-                        const originalText = result.transcription || result.original || result.text || "[無法辨識]";
+                        let originalText = "";
+                        let translationText = "";
+
+                        try {
+                            // 1. 嘗試乖乖解析 JSON 格式
+                            const result = JSON.parse(cleanText);
+                            translationText = result.translation || result.translated || result.Translation || "[翻譯欄位空白]";
+                            originalText = result.transcription || result.original || result.text || "[原文欄位空白]";
+                        } catch (parseError) {
+                            // 2. 【終極救援機制】如果 AI 沒給 JSON 導致解析壞掉
+                            // 我們絕對不丟掉資訊，直接把 AI 的原始回覆 (生肉) 印在畫面上！
+                            console.warn("JSON 解析失敗，啟用生肉救援模式");
+                            originalText = "⚠️ AI 未按格式回覆，以下為原始內容：";
+                            translationText = rawText || "[AI 毫無回應]"; 
+                        }
 
                         return { original: originalText, translation: translationText };
+
                     } catch (error) {
-                        if (attempt < 4) await new Promise(resolve => setTimeout(resolve, delays[attempt]));
-                        else return { original: "[連線錯誤或解析失敗]", translation: "請檢查金鑰狀態或再試一次" };
+                        if (attempt < 4) {
+                            await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+                        } else {
+                            // 這是最糟的狀況：網路徹底斷線，連 Google 伺服器都連不上
+                            return { original: "[網路連線徹底失敗]", translation: "請檢查網路狀態或金鑰" };
+                        }
                     }
                 }
             };
