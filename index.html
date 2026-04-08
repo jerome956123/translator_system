@@ -45,11 +45,9 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        // 指定使用最新的正式版極速模型
         const MODEL_NAME = "gemini-3-flash-preview"; 
 
         function App() {
-            // --- API Key 管理系統 ---
             const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
             const [inputKey, setInputKey] = useState('');
             const [isConfigured, setIsConfigured] = useState(!!localStorage.getItem('gemini_api_key'));
@@ -73,7 +71,6 @@
                 }
             };
 
-            // --- 原始系統狀態 ---
             const [messages, setMessages] = useState([]);
             const [appMode, setAppMode] = useState('stream'); 
             const [isPushToTalk, setIsPushToTalk] = useState(false);
@@ -158,7 +155,8 @@
                 const sourceLang = mode === 'user' ? 'Mandarin Chinese' : 'Japanese';
                 const targetLang = mode === 'user' ? 'Japanese' : 'Traditional Chinese';
                 const transcribeInstruction = mode === 'user' ? "Transcribe exactly in Traditional Chinese (繁體中文)." : "Transcribe exactly.";
-                const systemPrompt = `You are a simultaneous interpreter.\n1. Listen to the audio (${sourceLang}).\n2. ${transcribeInstruction}\n3. Translate to ${targetLang}.\nOutput strictly in JSON:\n{"transcription": "original", "translation": "translated"}`;
+                
+                const systemPrompt = `You are a simultaneous interpreter.\n1. Listen to the audio (${sourceLang}).\n2. ${transcribeInstruction}\n3. Translate to ${targetLang}.\nOutput strictly in valid JSON format with only two keys: "transcription" and "translation". Do not include markdown code blocks.`;
 
                 const delays = [1000, 2000, 4000, 8000];
                 for (let attempt = 0; attempt <= 4; attempt++) {
@@ -173,11 +171,19 @@
                         });
                         const data = await response.json();
                         if (data.error) throw new Error(data.error.message);
-                        const result = JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text);
-                        return { original: result.transcription || "[無法辨識]", translation: result.translation || "[翻譯失敗]" };
+                        
+                        let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+                        rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+                        
+                        const result = JSON.parse(rawText);
+                        
+                        const translationText = result.translation || result.translated || result.Translation || "[翻譯失敗]";
+                        const originalText = result.transcription || result.original || result.text || "[無法辨識]";
+
+                        return { original: originalText, translation: translationText };
                     } catch (error) {
                         if (attempt < 4) await new Promise(resolve => setTimeout(resolve, delays[attempt]));
-                        else return { original: "[連線錯誤]", translation: "請檢查金鑰或網路狀態" };
+                        else return { original: "[連線錯誤或解析失敗]", translation: "請檢查金鑰狀態或再試一次" };
                     }
                 }
             };
@@ -267,6 +273,22 @@
                 setInterimText(""); window.speechSynthesis.cancel();
             };
 
+            const handleCutAndContinue = (mode) => {
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                    mediaRecorderRef.current.stop();
+                } else if (recognitionRef.current) {
+                    recognitionRef.current.stop();
+                }
+
+                setTimeout(() => {
+                    if (appMode === 'stream') {
+                        startListeningStream(mode);
+                    } else {
+                        startRecordingAudio(mode);
+                    }
+                }, 300);
+            };
+
             const handleModeButtonPress = (mode) => {
                 if (activeMode === mode) { stopAll(); return; }
                 if (activeMode !== null) {
@@ -291,9 +313,6 @@
                 return { onClick: () => handleModeButtonPress(mode) };
             };
 
-            // --- 畫面渲染區塊 ---
-
-            // 如果還沒設定 API Key，顯示設定畫面
             if (!isConfigured) {
                 return (
                     <div className="flex flex-col h-screen max-w-md mx-auto bg-slate-900 border-x border-slate-800 shadow-2xl overflow-hidden justify-center items-center p-8 text-slate-200">
@@ -319,7 +338,6 @@
                 );
             }
 
-            // 正式主畫面
             return (
                 <div className="flex flex-col h-screen max-w-md mx-auto bg-slate-900 border-x border-slate-800 shadow-2xl overflow-hidden relative">
                     <header className="bg-slate-800 p-4 shadow-md z-10 flex justify-between items-center border-b border-slate-700 relative">
@@ -335,7 +353,7 @@
                         </button>
                     </header>
 
-                    <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-900">
+                    <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-900 pb-8">
                         {messages.length === 0 && !interimText && (
                             <div className="h-full flex flex-col items-center justify-center text-slate-600 space-y-4 opacity-50">
                                 <i className={`fa-solid ${appMode === 'stream' ? 'fa-bolt' : 'fa-microphone-lines'} text-6xl mb-2`}></i>
@@ -402,6 +420,19 @@
                             </button>
                         </div>
                         
+                        {/* 【升級】：無縫接力按鈕 (精簡圖示版) */}
+                        {activeMode !== null && !isPushToTalk && (
+                            <div className="mt-4 flex justify-center animate-slideIn">
+                                <button 
+                                    onClick={() => handleCutAndContinue(activeMode)}
+                                    title="傳送此段並立刻接續"
+                                    className={`w-14 h-14 rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-90 active:-rotate-180 duration-300 text-white text-2xl ${activeMode === 'user' ? 'bg-blue-500 hover:bg-blue-400' : 'bg-emerald-500 hover:bg-emerald-400'}`}
+                                >
+                                    <i className="fa-solid fa-arrows-rotate"></i>
+                                </button>
+                            </div>
+                        )}
+                        
                         <div className="text-center mt-3 h-5">
                             <p className="text-xs text-slate-400">{activeMode ? (appMode === 'record' ? "正在錄音..." : "正在聆聽中...") : (isPushToTalk ? "按住上方按鈕開始" : "點擊上方按鈕開始")}</p>
                         </div>
@@ -419,6 +450,4 @@
         root.render(<App />);
     </script>
 </body>
-</html> 
-
-
+</html>
