@@ -68,6 +68,14 @@
                 autoSaveAudioRef.current = autoSaveAudio;
             }, [autoSaveAudio]);
 
+            // 自動朗讀譯文：預設開啟，並記住使用者上次設定
+            const [autoPlayTranslation, setAutoPlayTranslation] = useState(() => localStorage.getItem('auto_play_translation') !== 'false');
+            const autoPlayTranslationRef = useRef(autoPlayTranslation);
+            useEffect(() => {
+                autoPlayTranslationRef.current = autoPlayTranslation;
+                localStorage.setItem('auto_play_translation', autoPlayTranslation ? 'true' : 'false');
+            }, [autoPlayTranslation]);
+
             const saveApiKey = () => {
                 if (inputKey.trim()) {
                     localStorage.setItem('gemini_api_key', inputKey.trim());
@@ -101,15 +109,27 @@
             const mediaRecorderRef = useRef(null);
             const messagesEndRef = useRef(null);
             const backupTranscriptRef = useRef(""); 
+            const ttsPauseRef = useRef(false);
+            const ttsSessionRef = useRef(0);
+            const activeModeRef = useRef(null);
+            const appModeRef = useRef(appMode);
+            const isListeningRef = useRef(isListening);
+            const isPushToTalkRef = useRef(isPushToTalk);
 
             const fileInputRef = useRef(null);
             const uploadSenderRef = useRef('user');
+
+            useEffect(() => { activeModeRef.current = activeMode; }, [activeMode]);
+            useEffect(() => { appModeRef.current = appMode; }, [appMode]);
+            useEffect(() => { isListeningRef.current = isListening; }, [isListening]);
+            useEffect(() => { isPushToTalkRef.current = isPushToTalk; }, [isPushToTalk]);
 
             useEffect(() => {
                 messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
             }, [messages, interimText]);
 
             useEffect(() => {
+                if (!('speechSynthesis' in window)) return;
                 const loadVoices = () => {
                     const availableVoices = window.speechSynthesis.getVoices();
                     if (availableVoices.length > 0) setVoices(availableVoices);
@@ -120,10 +140,34 @@
                 }
             }, []);
 
-            const speakText = (text, lang, id) => {
-                if (!('speechSynthesis' in window)) return;
+            const getTtsLangForSender = (sender) => {
+                return sender === 'me' ? SUPPORTED_LANGUAGES[targetLang].ttsLang : 'zh-TW';
+            };
+
+            const isSpeakableTranslation = (text) => {
+                if (!text || typeof text !== 'string') return false;
+                const trimmed = text.trim();
+                if (!trimmed) return false;
+                const blockedKeywords = ['翻譯失敗', '連線錯誤', '網路連線', '請檢查', '音訊處理失敗', '匯入音檔解析失敗', '欄位空白', '毫無回應'];
+                return !trimmed.startsWith('[') && !blockedKeywords.some(keyword => trimmed.includes(keyword));
+            };
+
+            const speakText = (text, lang, id, options = {}) => {
+                if (!('speechSynthesis' in window) || !text) return;
+
+                const { pauseRecognition = false, resumeMode = null } = options;
+                const shouldPauseRecognition = pauseRecognition && recognitionRef.current && appModeRef.current === 'stream';
+
+                if (shouldPauseRecognition) {
+                    ttsPauseRef.current = true;
+                    try { recognitionRef.current.stop(); } catch(e) { console.warn('暫停語音辨識失敗', e); }
+                }
+
+                const currentTtsSession = ttsSessionRef.current + 1;
+                ttsSessionRef.current = currentTtsSession;
                 window.speechSynthesis.cancel();
                 setSpeakingId(null);
+
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.lang = lang; 
                 utterance.rate = 1.0; 
@@ -131,10 +175,40 @@
                     let targetVoice = voices.find(v => v.lang === lang) || voices.find(v => v.lang.startsWith(lang.split('-')[0]));
                     if (targetVoice) utterance.voice = targetVoice;
                 }
+
+                const finishSpeaking = () => {
+                    if (currentTtsSession !== ttsSessionRef.current) return;
+                    setSpeakingId(null);
+                    if (shouldPauseRecognition) {
+                        setTimeout(() => {
+                            ttsPauseRef.current = false;
+                            const modeToResume = resumeMode || activeModeRef.current;
+                            if (modeToResume && appModeRef.current === 'stream' && isListeningRef.current && !isPushToTalkRef.current) {
+                                startListeningStream(modeToResume);
+                            }
+                        }, 300);
+                    }
+                };
+
                 utterance.onstart = () => setSpeakingId(id);
-                utterance.onend = () => setSpeakingId(null);
-                utterance.onerror = () => setSpeakingId(null);
-                window.speechSynthesis.speak(utterance);
+                utterance.onend = finishSpeaking;
+                utterance.onerror = finishSpeaking;
+
+                try {
+                    window.speechSynthesis.speak(utterance);
+                } catch (e) {
+                    console.warn('朗讀失敗', e);
+                    finishSpeaking();
+                }
+            };
+
+            const autoSpeakTranslation = (translation, sender, id, sourceMode = null) => {
+                if (!autoPlayTranslationRef.current || !isSpeakableTranslation(translation)) return;
+                const ttsLang = getTtsLangForSender(sender);
+                const pauseRecognition = appModeRef.current === 'stream' && recognitionRef.current && activeModeRef.current && !isPushToTalkRef.current;
+                setTimeout(() => {
+                    speakText(translation, ttsLang, id, { pauseRecognition, resumeMode: sourceMode });
+                }, 250);
             };
 
             const blobToBase64 = (blob) => {
@@ -228,7 +302,9 @@
                 if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
                     alert("您的瀏覽器不支援 Web Speech API。"); return;
                 }
-                if (recognitionRef.current) recognitionRef.current.stop();
+                if (recognitionRef.current) {
+                    try { recognitionRef.current.stop(); } catch(e) {}
+                }
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 const recognition = new SpeechRecognition();
                 
@@ -238,17 +314,28 @@
                 recognition.continuous = true;
                 recognition.interimResults = true;
 
-                recognition.onstart = () => { setIsListening(true); setActiveMode(mode); };
+                recognition.onstart = () => { 
+                    setIsListening(true); 
+                    setActiveMode(mode); 
+                    isListeningRef.current = true;
+                    activeModeRef.current = mode;
+                };
                 recognition.onerror = (e) => { if (e.error === 'not-allowed') { stopAll(); alert("請允許麥克風權限"); } };
                 recognition.onend = () => {
-                    if (isListening && !isPushToTalk) {
+                    // 自動朗讀時會短暫暫停語音辨識，避免喇叭聲被再次聽進去造成回音循環
+                    if (ttsPauseRef.current) return;
+
+                    if (isListeningRef.current && !isPushToTalkRef.current) {
                         setTimeout(() => {
-                            if (activeMode === mode && isListening && appMode === 'stream') {
+                            if (activeModeRef.current === mode && isListeningRef.current && appModeRef.current === 'stream') {
                                 try { recognition.start(); } catch(e) { stopAll(); }
                             }
                         }, 500);
                     } else {
-                        setIsListening(false); setActiveMode(null);
+                        setIsListening(false); 
+                        setActiveMode(null);
+                        isListeningRef.current = false;
+                        activeModeRef.current = null;
                     }
                 };
 
@@ -267,6 +354,7 @@
                         const sourceLangCode = mode === 'user' ? 'zh' : targetLang;
                         const translation = await translateTextWithGemini(finalTranscript, sourceLangCode);
                         setMessages(prev => prev.map(msg => msg.id === newMsgId ? { ...msg, translation: translation, loading: false } : msg));
+                        autoSpeakTranslation(translation, sender, newMsgId, mode);
                         setInterimText("");
                     }
                 };
@@ -363,6 +451,7 @@
                             }
 
                             setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: result.original, translation: result.translation, loading: false } : msg));
+                            autoSpeakTranslation(result.translation, sender, tempMsgId);
                         } catch (e) {
                             setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: "錯誤", translation: "音訊處理失敗", loading: false } : msg));
                         }
@@ -373,10 +462,17 @@
 
             const stopAll = () => {
                 setIsListening(false); setIsRecording(false);
-                if (recognitionRef.current) recognitionRef.current.stop();
+                isListeningRef.current = false;
+                activeModeRef.current = null;
+                ttsPauseRef.current = false;
+                ttsSessionRef.current += 1;
+                if (recognitionRef.current) {
+                    try { recognitionRef.current.stop(); } catch(e) {}
+                }
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') mediaRecorderRef.current.stop();
                 else setActiveMode(null);
-                setInterimText(""); window.speechSynthesis.cancel();
+                setInterimText(""); 
+                if ('speechSynthesis' in window) window.speechSynthesis.cancel();
             };
 
             const handleCutAndContinue = (mode) => {
@@ -448,6 +544,7 @@
                     const base64Audio = await blobToBase64(file);
                     let result = await processAudioWithGemini(base64Audio, mode, tempMsgId, mimeType);
                     setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: result.original, translation: result.translation, loading: false } : msg));
+                    autoSpeakTranslation(result.translation, senderLabel, tempMsgId);
                 } catch (e) {
                     setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: "錯誤", translation: "匯入音檔解析失敗", loading: false } : msg));
                 }
@@ -527,6 +624,14 @@
                             </div>
 
                             <button 
+                                onClick={() => setAutoPlayTranslation(!autoPlayTranslation)} 
+                                className={`text-lg transition-colors flex items-center gap-1 ${autoPlayTranslation ? 'text-yellow-300' : 'text-slate-500 hover:text-slate-300'}`} 
+                                title={autoPlayTranslation ? "自動朗讀譯文已開啟" : "點擊開啟自動朗讀譯文"}
+                            >
+                                <i className={`fa-solid ${autoPlayTranslation ? 'fa-volume-high' : 'fa-volume-xmark'}`}></i>
+                            </button>
+
+                            <button 
                                 onClick={() => setAutoSaveAudio(!autoSaveAudio)} 
                                 className={`text-lg transition-colors flex items-center gap-1 ${autoSaveAudio ? 'text-emerald-400' : 'text-slate-500 hover:text-slate-300'}`} 
                                 title={autoSaveAudio ? "自動存檔已開啟" : "點擊開啟自動存檔"}
@@ -585,7 +690,7 @@
                                             )}
                                             {!msg.loading && (
                                                 <button 
-                                                    onClick={() => speakText(msg.translation, msg.sender === 'me' ? currentPartnerLangConfig.ttsLang : 'zh-TW', msg.id)} 
+                                                    onClick={() => speakText(msg.translation, getTtsLangForSender(msg.sender), msg.id, { pauseRecognition: true, resumeMode: activeModeRef.current })} 
                                                     className={`p-2 rounded-full transition-colors flex-shrink-0 mt-[-4px] ${speakingId === msg.id ? 'bg-white text-slate-900 animate-pulse' : 'text-white/40 hover:text-white hover:bg-white/10'}`}
                                                 >
                                                     <i className={`fa-solid ${speakingId === msg.id ? 'fa-volume-high' : 'fa-volume-low'}`}></i>
@@ -660,7 +765,7 @@
                         </div>
                         
                         <div className="text-center mt-2 h-5">
-                            <p className="text-xs text-slate-400">{activeMode ? (appMode === 'record' ? "正在錄音..." : "正在聆聽中...") : (isPushToTalk ? "按住上方按鈕開始" : "點擊上方按鈕開始")}</p>
+                            <p className="text-xs text-slate-400">{speakingId ? "正在朗讀譯文..." : activeMode ? (appMode === 'record' ? "正在錄音..." : "正在聆聽中...") : (isPushToTalk ? "按住上方按鈕開始" : "點擊上方按鈕開始")}</p>
                         </div>
                     </div>
                 </div>
