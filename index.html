@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>多國語言口譯系統</title>
+    <title>多國語言口譯系統 (進階完整版)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -45,9 +45,9 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
+        // 鎖定使用你指定的模型
         const MODEL_NAME = "gemini-3-flash-preview"; 
 
-        // 定義支援的語言列表
         const SUPPORTED_LANGUAGES = {
             ja: { name: "日本語", promptName: "Japanese", sttLang: "ja-JP", ttsLang: "ja-JP", instruction: "長押しで話す" },
             en: { name: "English", promptName: "English", sttLang: "en-US", ttsLang: "en-US", instruction: "Hold to speak" },
@@ -60,9 +60,13 @@
             const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
             const [inputKey, setInputKey] = useState('');
             const [isConfigured, setIsConfigured] = useState(!!localStorage.getItem('gemini_api_key'));
-
-            // 新增：目標語言狀態，預設為日文 (ja)
             const [targetLang, setTargetLang] = useState('ja');
+            
+            const [autoSaveAudio, setAutoSaveAudio] = useState(false);
+            const autoSaveAudioRef = useRef(autoSaveAudio);
+            useEffect(() => {
+                autoSaveAudioRef.current = autoSaveAudio;
+            }, [autoSaveAudio]);
 
             const saveApiKey = () => {
                 if (inputKey.trim()) {
@@ -96,6 +100,10 @@
             const recognitionRef = useRef(null);
             const mediaRecorderRef = useRef(null);
             const messagesEndRef = useRef(null);
+            const backupTranscriptRef = useRef(""); 
+
+            const fileInputRef = useRef(null);
+            const uploadSenderRef = useRef('user');
 
             useEffect(() => {
                 messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -140,7 +148,6 @@
                 });
             };
 
-            // 翻譯提示詞更新，使用動態選擇的語言
             const translateTextWithGemini = async (text, sourceLang) => {
                 const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
                 const destLangName = sourceLang === 'zh' ? selectedLangConfig.promptName : 'Traditional Chinese';
@@ -166,8 +173,7 @@
                 }
             };
 
-            // 音訊提示詞更新，使用動態選擇的語言
-            const processAudioWithGemini = async (audioBase64, mode, messageId) => {
+            const processAudioWithGemini = async (audioBase64, mode, messageId, mimeType = "audio/webm") => {
                 const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
                 const sourceLangName = mode === 'user' ? 'Mandarin Chinese' : selectedLangConfig.promptName;
                 const destLangName = mode === 'user' ? selectedLangConfig.promptName : 'Traditional Chinese';
@@ -183,7 +189,7 @@
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                contents: [{ parts: [{ text: systemPrompt }, { inlineData: { mimeType: "audio/webm", data: audioBase64 } }] }],
+                                contents: [{ parts: [{ text: systemPrompt }, { inlineData: { mimeType: mimeType, data: audioBase64 } }] }],
                                 generationConfig: { responseMimeType: "application/json" }
                             })
                         });
@@ -226,7 +232,6 @@
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 const recognition = new SpeechRecognition();
                 
-                // 動態設定語音辨識的語言
                 const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
                 recognition.lang = mode === 'user' ? 'cmn-Hant-TW' : selectedLangConfig.sttLang;
                 
@@ -259,7 +264,6 @@
                         const newMsgId = Date.now();
                         const sender = mode === 'user' ? 'me' : 'partner';
                         setMessages(prev => [...prev, { id: newMsgId, text: finalTranscript, translation: "翻譯中...", sender: sender, loading: true, mode: 'stream' }]);
-                        // 修正：動態傳遞第二個參數
                         const sourceLangCode = mode === 'user' ? 'zh' : targetLang;
                         const translation = await translateTextWithGemini(finalTranscript, sourceLangCode);
                         setMessages(prev => prev.map(msg => msg.id === newMsgId ? { ...msg, translation: translation, loading: false } : msg));
@@ -277,21 +281,87 @@
                     let localChunks = [];
                     mediaRecorderRef.current = mediaRecorder;
 
+                    backupTranscriptRef.current = "";
+                    let backupRecognition = null;
+                    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                        backupRecognition = new SpeechRecognition();
+                        const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
+                        backupRecognition.lang = mode === 'user' ? 'cmn-Hant-TW' : selectedLangConfig.sttLang;
+                        backupRecognition.continuous = true;
+                        backupRecognition.interimResults = true;
+                        
+                        backupRecognition.onresult = (event) => {
+                            let interimTranscript = '';
+                            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                                interimTranscript += event.results[i][0].transcript;
+                            }
+                            backupTranscriptRef.current = interimTranscript;
+                        };
+                    }
+
                     mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) localChunks.push(e.data); };
-                    mediaRecorder.onstart = () => { setIsRecording(true); setActiveMode(mode); };
+                    
+                    mediaRecorder.onstart = () => { 
+                        setIsRecording(true); 
+                        setActiveMode(mode); 
+                        if (backupRecognition) {
+                            try { backupRecognition.start(); } catch(e) { console.warn("備用引擎啟動失敗", e); }
+                        }
+                    };
+                    
                     mediaRecorder.onstop = async () => {
                         setIsRecording(false); setActiveMode(null);
                         stream.getTracks().forEach(track => track.stop());
+                        
+                        if (backupRecognition) {
+                            try { backupRecognition.stop(); } catch(e) {}
+                        }
+
                         if (localChunks.length === 0) return;
 
                         const tempMsgId = Date.now();
                         const sender = mode === 'user' ? 'me' : 'partner';
-                        setMessages(prev => [...prev, { id: tempMsgId, text: "音訊上傳處理中...", translation: "Gemini 聽打翻譯中...", sender: sender, loading: true, mode: 'record' }]);
+                        
+                        const audioBlob = new Blob(localChunks, { type: 'audio/webm' });
+                        const audioUrl = URL.createObjectURL(audioBlob);
+
+                        if (autoSaveAudioRef.current) {
+                            const a = document.createElement('a');
+                            a.style.display = 'none';
+                            a.href = audioUrl;
+                            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                            a.download = `Audio_${sender}_${timestamp}.webm`;
+                            document.body.appendChild(a);
+                            a.click();
+                            setTimeout(() => { document.body.removeChild(a); }, 100);
+                        }
+
+                        setMessages(prev => [...prev, { 
+                            id: tempMsgId, 
+                            text: "音訊上傳處理中...", 
+                            translation: "Gemini 聽打翻譯中...", 
+                            sender: sender, 
+                            loading: true, 
+                            mode: 'record',
+                            audioUrl: audioUrl
+                        }]);
                         
                         try {
-                            const audioBlob = new Blob(localChunks, { type: 'audio/webm' });
                             const base64Audio = await blobToBase64(audioBlob);
-                            const result = await processAudioWithGemini(base64Audio, mode, tempMsgId);
+                            let result = await processAudioWithGemini(base64Audio, mode, tempMsgId);
+                            
+                            if ((result.original === "[原文欄位空白]" || result.original.includes("無法辨識")) && backupTranscriptRef.current.trim() !== "") {
+                                console.log("啟動雙引擎備援！");
+                                const backupText = backupTranscriptRef.current;
+                                const sourceLangCode = mode === 'user' ? 'zh' : targetLang;
+                                
+                                setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: backupText, translation: "啟用備援翻譯中...", loading: true } : msg));
+                                
+                                const fallbackTranslation = await translateTextWithGemini(backupText, sourceLangCode);
+                                result = { original: backupText, translation: fallbackTranslation };
+                            }
+
                             setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: result.original, translation: result.translation, loading: false } : msg));
                         } catch (e) {
                             setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: "錯誤", translation: "音訊處理失敗", loading: false } : msg));
@@ -349,6 +419,55 @@
                 return { onClick: () => handleModeButtonPress(mode) };
             };
 
+            const triggerUpload = (mode) => {
+                uploadSenderRef.current = mode;
+                if(fileInputRef.current) fileInputRef.current.click();
+            };
+
+            const handleFileUpload = async (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                const mode = uploadSenderRef.current;
+                const tempMsgId = Date.now();
+                const senderLabel = mode === 'user' ? 'me' : 'partner';
+                const audioUrl = URL.createObjectURL(file);
+                const mimeType = file.type || "audio/mp3";
+
+                setMessages(prev => [...prev, { 
+                    id: tempMsgId, 
+                    text: `匯入處理中... (${file.name})`, 
+                    translation: "Gemini 翻譯中...", 
+                    sender: senderLabel, 
+                    loading: true, 
+                    mode: 'import',
+                    audioUrl: audioUrl
+                }]);
+                
+                try {
+                    const base64Audio = await blobToBase64(file);
+                    let result = await processAudioWithGemini(base64Audio, mode, tempMsgId, mimeType);
+                    setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: result.original, translation: result.translation, loading: false } : msg));
+                } catch (e) {
+                    setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: "錯誤", translation: "匯入音檔解析失敗", loading: false } : msg));
+                }
+                
+                event.target.value = ''; 
+            };
+
+            const moveMessage = (index, direction) => {
+                setMessages(prev => {
+                    const newMsgs = [...prev];
+                    if (direction === -1 && index > 0) { 
+                        [newMsgs[index - 1], newMsgs[index]] = [newMsgs[index], newMsgs[index - 1]];
+                    } else if (direction === 1 && index < newMsgs.length - 1) { 
+                        [newMsgs[index], newMsgs[index + 1]] = [newMsgs[index + 1], newMsgs[index]];
+                    }
+                    return newMsgs;
+                });
+            };
+
+            // 注意：這個區塊就是之前被截斷的地方，現在已經完整修復了！
             if (!isConfigured) {
                 return (
                     <div className="flex flex-col h-screen max-w-md mx-auto bg-slate-900 border-x border-slate-800 shadow-2xl overflow-hidden justify-center items-center p-8 text-slate-200">
@@ -378,6 +497,8 @@
 
             return (
                 <div className="flex flex-col h-screen max-w-md mx-auto bg-slate-900 border-x border-slate-800 shadow-2xl overflow-hidden relative">
+                    <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept="audio/*" className="hidden" />
+
                     <header className="bg-slate-800 p-4 shadow-md z-10 flex justify-between items-center border-b border-slate-700 relative">
                         <div className="flex items-center gap-2">
                             <i className="fa-solid fa-language text-blue-400 text-xl"></i>
@@ -388,7 +509,6 @@
                         </div>
                         
                         <div className="flex items-center gap-3">
-                            {/* 新增：語言切換下拉選單 */}
                             <div className="relative">
                                 <select 
                                     value={targetLang} 
@@ -406,6 +526,14 @@
                                 </div>
                             </div>
 
+                            <button 
+                                onClick={() => setAutoSaveAudio(!autoSaveAudio)} 
+                                className={`text-lg transition-colors flex items-center gap-1 ${autoSaveAudio ? 'text-emerald-400' : 'text-slate-500 hover:text-slate-300'}`} 
+                                title={autoSaveAudio ? "自動存檔已開啟" : "點擊開啟自動存檔"}
+                            >
+                                <i className="fa-solid fa-floppy-disk"></i>
+                            </button>
+
                             <button onClick={resetApiKey} className="text-slate-400 hover:text-slate-200 text-sm transition-colors" title="重設 API Key">
                                 <i className="fa-solid fa-gear"></i>
                             </button>
@@ -420,28 +548,50 @@
                                 <p className="text-sm">{isPushToTalk ? '按住下方按鈕開始對話' : '點擊下方按鈕開始對話'}</p>
                             </div>
                         )}
-                        {messages.map((msg) => (
+                        {messages.map((msg, index) => (
                             <div key={msg.id} className={`flex flex-col ${msg.sender === 'me' ? 'items-end' : 'items-start'} message-enter`}>
                                 <div className={`max-w-[85%] rounded-2xl p-4 shadow-lg border relative ${msg.sender === 'me' ? 'bg-blue-600/20 border-blue-500/30 text-blue-100 rounded-br-none' : 'bg-emerald-600/20 border-emerald-500/30 text-emerald-100 rounded-bl-none'}`}>
-                                    <span className="absolute top-2 right-2 text-[10px] opacity-40 uppercase tracking-wider border border-white/20 px-1 rounded">{msg.mode === 'stream' ? 'Live' : 'Audio'}</span>
+                                    <span className="absolute top-2 right-2 text-[10px] opacity-40 uppercase tracking-wider border border-white/20 px-1 rounded">{msg.mode === 'stream' ? 'Live' : msg.mode === 'import' ? 'Import' : 'Audio'}</span>
                                     <p className="text-sm opacity-70 mb-1 font-light">{msg.sender === 'me' ? '我 (中文)' : `對方 (${currentPartnerLangConfig.name})`}</p>
-                                    {msg.loading && msg.mode === 'record' ? (
-                                        <div className="flex items-center gap-2 mb-2 text-slate-300"><i className="fa-solid fa-circle-notch fa-spin"></i><span className="text-lg italic opacity-70">處理中...</span></div>
+                                    
+                                    {msg.loading && (msg.mode === 'record' || msg.mode === 'import') ? (
+                                        <div className="flex items-center gap-2 mb-2 text-slate-300"><i className="fa-solid fa-circle-notch fa-spin"></i><span className="text-lg italic opacity-70">{msg.mode === 'import' ? '音檔解析中...' : '處理中...'}</span></div>
                                     ) : (<p className="text-lg mb-2 leading-snug">{msg.text}</p>)}
+                                    
                                     <div className={`h-px w-full my-2 ${msg.sender === 'me' ? 'bg-blue-500/30' : 'bg-emerald-500/30'}`}></div>
+                                    
                                     <div className="flex items-start gap-3 justify-between">
                                         <div className="flex items-start gap-2 flex-1">
                                             <i className={`fa-solid fa-language mt-1 text-xs ${msg.loading ? 'animate-pulse' : ''}`}></i>
                                             <p className={`font-bold text-xl tracking-wide ${msg.loading ? 'animate-pulse text-slate-400' : 'text-white'}`}>{msg.translation}</p>
                                         </div>
-                                        {!msg.loading && (
-                                            <button 
-                                                onClick={() => speakText(msg.translation, msg.sender === 'me' ? currentPartnerLangConfig.ttsLang : 'zh-TW', msg.id)} 
-                                                className={`p-2 rounded-full transition-colors flex-shrink-0 mt-[-4px] ${speakingId === msg.id ? 'bg-white text-slate-900 animate-pulse' : 'text-white/40 hover:text-white hover:bg-white/10'}`}
-                                            >
-                                                <i className={`fa-solid ${speakingId === msg.id ? 'fa-volume-high' : 'fa-volume-low'}`}></i>
-                                            </button>
-                                        )}
+                                        
+                                        <div className="flex items-center gap-1">
+                                            {index > 0 && (
+                                                <button onClick={() => moveMessage(index, -1)} className="p-2 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-colors flex-shrink-0 mt-[-4px]" title="上移對話">
+                                                    <i className="fa-solid fa-arrow-up text-xs"></i>
+                                                </button>
+                                            )}
+                                            {index < messages.length - 1 && (
+                                                <button onClick={() => moveMessage(index, 1)} className="p-2 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-colors flex-shrink-0 mt-[-4px]" title="下移對話">
+                                                    <i className="fa-solid fa-arrow-down text-xs"></i>
+                                                </button>
+                                            )}
+
+                                            {!msg.loading && msg.audioUrl && (
+                                                <a href={msg.audioUrl} download={`Audio_${msg.id}.webm`} className="p-2 rounded-full text-white/40 hover:text-white hover:bg-white/10 transition-colors flex-shrink-0 mt-[-4px]" title="下載原始音檔">
+                                                    <i className="fa-solid fa-download"></i>
+                                                </a>
+                                            )}
+                                            {!msg.loading && (
+                                                <button 
+                                                    onClick={() => speakText(msg.translation, msg.sender === 'me' ? currentPartnerLangConfig.ttsLang : 'zh-TW', msg.id)} 
+                                                    className={`p-2 rounded-full transition-colors flex-shrink-0 mt-[-4px] ${speakingId === msg.id ? 'bg-white text-slate-900 animate-pulse' : 'text-white/40 hover:text-white hover:bg-white/10'}`}
+                                                >
+                                                    <i className={`fa-solid ${speakingId === msg.id ? 'fa-volume-high' : 'fa-volume-low'}`}></i>
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -494,13 +644,23 @@
                             </div>
                         )}
                         
-                        <div className="text-center mt-3 h-5">
-                            <p className="text-xs text-slate-400">{activeMode ? (appMode === 'record' ? "正在錄音..." : "正在聆聽中...") : (isPushToTalk ? "按住上方按鈕開始" : "點擊上方按鈕開始")}</p>
-                        </div>
-                        <div className="flex justify-center mt-2">
+                        <div className="flex justify-between items-center mt-4">
+                            <div className="flex gap-3">
+                                <button onClick={() => triggerUpload('user')} className="text-xs text-blue-400 hover:text-blue-300 transition flex items-center gap-1">
+                                    <i className="fa-solid fa-file-audio"></i> 匯入中文
+                                </button>
+                                <button onClick={() => triggerUpload('partner')} className="text-xs text-emerald-400 hover:text-emerald-300 transition flex items-center gap-1">
+                                    <i className="fa-solid fa-file-audio"></i> 匯入{currentPartnerLangConfig.name}
+                                </button>
+                            </div>
+                            
                             {messages.length > 0 && (
-                                <button onClick={() => {if(confirm("確定清除紀錄？")) setMessages([]);}} className="text-xs text-slate-500 hover:text-red-400 transition flex items-center gap-1"><i className="fa-solid fa-trash"></i> 清除紀錄</button>
+                                <button onClick={() => {if(confirm("確定清除紀錄？")) setMessages([]);}} className="text-xs text-slate-500 hover:text-red-400 transition flex items-center gap-1"><i className="fa-solid fa-trash"></i> 清除</button>
                             )}
+                        </div>
+                        
+                        <div className="text-center mt-2 h-5">
+                            <p className="text-xs text-slate-400">{activeMode ? (appMode === 'record' ? "正在錄音..." : "正在聆聽中...") : (isPushToTalk ? "按住上方按鈕開始" : "點擊上方按鈕開始")}</p>
                         </div>
                     </div>
                 </div>
