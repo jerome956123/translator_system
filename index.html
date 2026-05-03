@@ -152,6 +152,36 @@
                 return !trimmed.startsWith('[') && !blockedKeywords.some(keyword => trimmed.includes(keyword));
             };
 
+            const getPreferredVoice = (lang) => {
+                if (!lang || voices.length === 0) return null;
+                const normalizedLang = lang.toLowerCase();
+                const langRoot = normalizedLang.split('-')[0];
+                const matchingVoices = voices.filter(v => {
+                    const voiceLang = (v.lang || '').toLowerCase();
+                    return voiceLang === normalizedLang || voiceLang.startsWith(langRoot);
+                });
+                if (matchingVoices.length === 0) return null;
+
+                const isChinese = normalizedLang.startsWith('zh');
+                const taiwanFirst = isChinese
+                    ? matchingVoices.filter(v => {
+                        const voiceLang = (v.lang || '').toLowerCase();
+                        return voiceLang.includes('tw') || voiceLang.includes('hant') || voiceLang.includes('cmn-hant');
+                    })
+                    : matchingVoices;
+                const pool = taiwanFirst.length > 0 ? taiwanFirst : matchingVoices;
+
+                const preferredKeywords = isChinese
+                    ? ['google', 'microsoft hsiaochen', 'microsoft hanhan', 'microsoft yunjhe', 'microsoft tracy', 'mei-jia', 'mei jia', 'ting-ting', 'sinji', 'natural', 'neural']
+                    : ['google', 'microsoft', 'natural', 'neural', 'enhanced', 'premium'];
+
+                for (const keyword of preferredKeywords) {
+                    const found = pool.find(v => (v.name || '').toLowerCase().includes(keyword));
+                    if (found) return found;
+                }
+                return pool[0] || matchingVoices[0];
+            };
+
             const speakText = (text, lang, id, options = {}) => {
                 if (!('speechSynthesis' in window) || !text) return;
 
@@ -170,9 +200,10 @@
 
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.lang = lang; 
-                utterance.rate = 1.0; 
+                utterance.rate = lang && lang.startsWith('zh') ? 0.92 : 1.0;
+                utterance.pitch = lang && lang.startsWith('zh') ? 1.05 : 1.0;
                 if (voices.length > 0) {
-                    let targetVoice = voices.find(v => v.lang === lang) || voices.find(v => v.lang.startsWith(lang.split('-')[0]));
+                    const targetVoice = getPreferredVoice(lang);
                     if (targetVoice) utterance.voice = targetVoice;
                 }
 
@@ -564,6 +595,81 @@
                 });
             };
 
+            const formatMessageTime = (msg) => {
+                const sourceTime = typeof msg.id === 'number' ? msg.id : Date.now();
+                const date = new Date(sourceTime);
+                if (Number.isNaN(date.getTime())) return '';
+                return date.toLocaleString('zh-TW', { hour12: false });
+            };
+
+            const downloadTextFile = (content, filename, mimeType) => {
+                const blob = new Blob([content], { type: mimeType });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => {
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                }, 100);
+            };
+
+            const csvEscape = (value) => {
+                const text = String(value ?? '');
+                return `"${text.replace(/"/g, '""')}"`;
+            };
+
+            const exportConversation = (format = 'txt') => {
+                if (messages.length === 0) {
+                    alert('目前沒有可以匯出的對話紀錄');
+                    return;
+                }
+
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const languageLabel = SUPPORTED_LANGUAGES[targetLang]?.name || targetLang;
+
+                if (format === 'csv') {
+                    const rows = [
+                        ['時間', '說話者', '模式', '原文', '譯文', '是否有音檔'],
+                        ...messages.map(msg => [
+                            formatMessageTime(msg),
+                            msg.sender === 'me' ? '我（中文）' : `對方（${languageLabel}）`,
+                            msg.mode === 'stream' ? '即時' : msg.mode === 'import' ? '匯入音檔' : '錄音',
+                            msg.text || '',
+                            msg.translation || '',
+                            msg.audioUrl ? '是' : '否'
+                        ])
+                    ];
+                    const csvContent = '\ufeff' + rows.map(row => row.map(csvEscape).join(',')).join('\n');
+                    downloadTextFile(csvContent, `口譯對話紀錄_${timestamp}.csv`, 'text/csv;charset=utf-8');
+                    return;
+                }
+
+                const lines = [
+                    '口譯系統對話紀錄',
+                    `匯出時間：${new Date().toLocaleString('zh-TW', { hour12: false })}`,
+                    `目前外語：${languageLabel}`,
+                    `對話筆數：${messages.length}`,
+                    '==================================================',
+                    ''
+                ];
+
+                messages.forEach((msg, idx) => {
+                    const speaker = msg.sender === 'me' ? '我（中文）' : `對方（${languageLabel}）`;
+                    const modeLabel = msg.mode === 'stream' ? '即時' : msg.mode === 'import' ? '匯入音檔' : '錄音';
+                    lines.push(`[${idx + 1}] ${formatMessageTime(msg)}｜${speaker}｜${modeLabel}`);
+                    lines.push(`原文：${msg.text || ''}`);
+                    lines.push(`譯文：${msg.translation || ''}`);
+                    if (msg.audioUrl) lines.push('音檔：此筆有原始音檔，可在畫面中個別下載。');
+                    lines.push('');
+                });
+
+                downloadTextFile(lines.join('\n'), `口譯對話紀錄_${timestamp}.txt`, 'text/plain;charset=utf-8');
+            };
+
             // 注意：這個區塊就是之前被截斷的地方，現在已經完整修復了！
             if (!isConfigured) {
                 return (
@@ -760,7 +866,15 @@
                             </div>
                             
                             {messages.length > 0 && (
-                                <button onClick={() => {if(confirm("確定清除紀錄？")) setMessages([]);}} className="text-xs text-slate-500 hover:text-red-400 transition flex items-center gap-1"><i className="fa-solid fa-trash"></i> 清除</button>
+                                <div className="flex items-center gap-3">
+                                    <button onClick={() => exportConversation('txt')} className="text-xs text-amber-300 hover:text-amber-200 transition flex items-center gap-1" title="匯出文字紀錄">
+                                        <i className="fa-solid fa-file-lines"></i> TXT
+                                    </button>
+                                    <button onClick={() => exportConversation('csv')} className="text-xs text-amber-300 hover:text-amber-200 transition flex items-center gap-1" title="匯出 Excel 可開啟的 CSV">
+                                        <i className="fa-solid fa-table"></i> CSV
+                                    </button>
+                                    <button onClick={() => {if(confirm("確定清除紀錄？")) setMessages([]);}} className="text-xs text-slate-500 hover:text-red-400 transition flex items-center gap-1"><i className="fa-solid fa-trash"></i> 清除</button>
+                                </div>
                             )}
                         </div>
                         
