@@ -45,8 +45,12 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        // 鎖定使用你指定的模型
-        const MODEL_NAME = "gemini-3-flash-preview"; 
+        // 模型分流：即時字幕用快速文字模型；錄音/匯入音檔保留原本較強的音訊模型
+        const AUDIO_MODEL_NAME = "gemini-3-flash-preview";
+        const FAST_TEXT_MODEL_NAME = "gemini-3.1-flash-lite";
+        const FAST_TEXT_FALLBACK_MODEL_NAME = "gemini-2.5-flash-lite";
+        const MODEL_NAME = AUDIO_MODEL_NAME;
+        const LIVE_DRAFT_INTERVAL_MS = 900;
 
         const SUPPORTED_LANGUAGES = {
             ja: { name: "日本語", promptName: "Japanese", sttLang: "ja-JP", ttsLang: "ja-JP", instruction: "長押しで話す" },
@@ -103,6 +107,8 @@
             const [speakingId, setSpeakingId] = useState(null); 
             const [activeMode, setActiveMode] = useState(null);
             const [interimText, setInterimText] = useState("");
+            const [liveDraftTranslation, setLiveDraftTranslation] = useState("");
+            const [liveDraftLoading, setLiveDraftLoading] = useState(false);
             const [voices, setVoices] = useState([]);
 
             const recognitionRef = useRef(null);
@@ -116,6 +122,12 @@
             const appModeRef = useRef(appMode);
             const isListeningRef = useRef(isListening);
             const isPushToTalkRef = useRef(isPushToTalk);
+            const liveDraftTimerRef = useRef(null);
+            const liveDraftSeqRef = useRef(0);
+            const liveDraftInFlightRef = useRef(false);
+            const liveDraftPendingRef = useRef(null);
+            const liveDraftLastStartedAtRef = useRef(0);
+            const liveDraftTextRef = useRef("");
 
             const fileInputRef = useRef(null);
             const uploadSenderRef = useRef('user');
@@ -127,7 +139,7 @@
 
             useEffect(() => {
                 messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-            }, [messages, interimText]);
+            }, [messages, interimText, liveDraftTranslation]);
 
             useEffect(() => {
                 if (!('speechSynthesis' in window)) return;
@@ -444,29 +456,148 @@
                 return '音訊處理失敗，請確認網路、金鑰、檔案大小或稍後再試。';
             };
 
-            const translateTextWithGemini = async (text, sourceLang) => {
+            const isTranslatableLiveText = (text, mode) => {
+                const cleaned = normalizeTranscriptForFallback(text);
+                if (!cleaned) return false;
+                const compact = cleaned.replace(/[\s。！？!?.,，、；;：:「」『』"'()（）【】\[\]{}]/g, '');
+                const fillerOnly = /^(嗯+|呃+|啊+|喔+|哦+|好+|是+|はい+|え+|あ+|うん+|はいはい+|yes|yeah|ok|okay)$/i.test(compact);
+                if (fillerOnly) return false;
+
+                const cjkCount = countCjkKanaHangul(cleaned);
+                const latinWordCount = countLatinWords(cleaned);
+                const nonSpaceLength = cleaned.replace(/\s/g, '').length;
+
+                // 暫譯門檻比備援低一點，讓字幕更早出現；final 翻譯仍會再修正一次。
+                if (mode === 'user' || ['ja', 'ko'].includes(targetLang)) {
+                    return cjkCount >= 4 || nonSpaceLength >= 6 || latinWordCount >= 2;
+                }
+                return latinWordCount >= 2 || nonSpaceLength >= 7 || cjkCount >= 4;
+            };
+
+            const getTextModelCandidates = (preferredModel) => {
+                return [...new Set([preferredModel, FAST_TEXT_MODEL_NAME, FAST_TEXT_FALLBACK_MODEL_NAME, MODEL_NAME].filter(Boolean))];
+            };
+
+            const clearLiveDraftTranslation = () => {
+                if (liveDraftTimerRef.current) {
+                    clearTimeout(liveDraftTimerRef.current);
+                    liveDraftTimerRef.current = null;
+                }
+                liveDraftSeqRef.current += 1;
+                liveDraftPendingRef.current = null;
+                liveDraftTextRef.current = "";
+                setLiveDraftLoading(false);
+                setLiveDraftTranslation("");
+            };
+
+            const translateTextWithGemini = async (text, sourceLang, options = {}) => {
                 const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
                 const destLangName = sourceLang === 'zh' ? selectedLangConfig.promptName : 'Traditional Chinese';
                 const sourceLangName = sourceLang === 'zh' ? 'Traditional Chinese' : selectedLangConfig.promptName;
-                
-                const systemPrompt = `You are a professional real-time interpreter. Translate the following ${sourceLangName} text to ${destLangName}. Output ONLY the translated text. No explanations.`;
+                const cleanedText = normalizeTranscriptForFallback(text);
+                if (!cleanedText) return "[翻譯失敗]";
 
-                const delays = [1000, 2000, 4000, 8000];
-                for (let attempt = 0; attempt <= 4; attempt++) {
-                    try {
-                        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${apiKey}`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nOriginal Text: "${text}"` }] }] })
-                        });
-                        const data = await response.json();
-                        if (data.error) throw new Error(data.error.message);
-                        return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "[翻譯失敗]";
-                    } catch (error) {
-                        if (attempt < 4) await new Promise(resolve => setTimeout(resolve, delays[attempt]));
-                        else return "[連線錯誤，請檢查金鑰或網路]";
+                const { draft = false, realtime = false, modelName = null } = options;
+                const systemPrompt = draft
+                    ? `You are a low-latency subtitle translator. The ${sourceLangName} text may be partial. Translate it to ${destLangName} faithfully. Do NOT invent missing words, do NOT complete unfinished sentences, and do NOT explain. Output ONLY the translated text.`
+                    : `You are a professional real-time interpreter. Translate the following ${sourceLangName} text to ${destLangName}. Output ONLY the translated text. No explanations.`;
+
+                const modelCandidates = getTextModelCandidates(modelName || (realtime || draft ? FAST_TEXT_MODEL_NAME : MODEL_NAME));
+                const maxAttemptsPerModel = realtime || draft ? 2 : 4;
+                const delays = realtime || draft ? [500, 1000] : [1000, 2000, 4000, 8000];
+                let lastErrorMessage = '';
+
+                for (const currentModelName of modelCandidates) {
+                    for (let attempt = 0; attempt <= maxAttemptsPerModel; attempt++) {
+                        try {
+                            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${currentModelName}:generateContent?key=${apiKey}`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    contents: [{ parts: [{ text: `${systemPrompt}\n\nOriginal Text: "${cleanedText}"` }] }],
+                                    generationConfig: {
+                                        temperature: realtime || draft ? 0.2 : 0.4,
+                                        maxOutputTokens: draft ? 256 : 768
+                                    }
+                                })
+                            });
+                            const data = await response.json();
+                            if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+                            const output = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+                            return output || "[翻譯失敗]";
+                        } catch (error) {
+                            lastErrorMessage = error?.message || String(error || '未知錯誤');
+                            const modelUnavailable = /not found|not supported|permission|model/i.test(lastErrorMessage);
+                            if (modelUnavailable) break;
+                            if (attempt < maxAttemptsPerModel) await sleep(delays[Math.min(attempt, delays.length - 1)]);
+                        }
                     }
                 }
+                console.warn('文字翻譯失敗：', lastErrorMessage);
+                return "[連線錯誤，請檢查金鑰或網路]";
+            };
+
+            const runLiveDraftTranslation = async (mode, text, seq) => {
+                const cleaned = normalizeTranscriptForFallback(text);
+                if (!isTranslatableLiveText(cleaned, mode)) {
+                    if (seq === liveDraftSeqRef.current) setLiveDraftLoading(false);
+                    return;
+                }
+
+                liveDraftInFlightRef.current = true;
+                liveDraftLastStartedAtRef.current = Date.now();
+                setLiveDraftLoading(true);
+
+                const sourceLangCode = mode === 'user' ? 'zh' : targetLang;
+                const translation = await translateTextWithGemini(cleaned, sourceLangCode, {
+                    draft: true,
+                    realtime: true,
+                    modelName: FAST_TEXT_MODEL_NAME
+                });
+
+                if (seq === liveDraftSeqRef.current && liveDraftTextRef.current === cleaned && activeModeRef.current === mode && appModeRef.current === 'stream') {
+                    if (isSpeakableTranslation(translation)) {
+                        setLiveDraftTranslation(translation);
+                    }
+                    setLiveDraftLoading(false);
+                }
+
+                liveDraftInFlightRef.current = false;
+                const pending = liveDraftPendingRef.current;
+                liveDraftPendingRef.current = null;
+                if (pending && pending.text !== cleaned && activeModeRef.current === pending.mode && appModeRef.current === 'stream') {
+                    scheduleLiveDraftTranslation(pending.mode, pending.text);
+                }
+            };
+
+            const scheduleLiveDraftTranslation = (mode, text) => {
+                const cleaned = normalizeTranscriptForFallback(text);
+                liveDraftTextRef.current = cleaned;
+
+                if (!isTranslatableLiveText(cleaned, mode)) {
+                    setLiveDraftTranslation("");
+                    setLiveDraftLoading(false);
+                    return;
+                }
+
+                if (liveDraftInFlightRef.current) {
+                    liveDraftPendingRef.current = { mode, text: cleaned };
+                    setLiveDraftLoading(true);
+                    return;
+                }
+
+                if (liveDraftTimerRef.current) clearTimeout(liveDraftTimerRef.current);
+                const now = Date.now();
+                const elapsed = now - liveDraftLastStartedAtRef.current;
+                const delay = Math.max(0, LIVE_DRAFT_INTERVAL_MS - elapsed);
+                const seq = liveDraftSeqRef.current + 1;
+                liveDraftSeqRef.current = seq;
+                setLiveDraftLoading(true);
+
+                liveDraftTimerRef.current = setTimeout(() => {
+                    liveDraftTimerRef.current = null;
+                    runLiveDraftTranslation(mode, cleaned, seq);
+                }, delay);
             };
 
             const translateBackupTranscriptWithGemini = async (text, sourceLang) => {
@@ -481,7 +612,7 @@
                 const delays = [800, 1600, 3200];
                 for (let attempt = 0; attempt <= 3; attempt++) {
                     try {
-                        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${apiKey}`, {
+                        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${AUDIO_MODEL_NAME}:generateContent?key=${apiKey}`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nFallback transcript: "${cleanedText}"` }] }] })
@@ -517,7 +648,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
 
                     for (let attempt = 0; attempt <= 3; attempt++) {
                         try {
-                            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${apiKey}`, {
+                            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${AUDIO_MODEL_NAME}:generateContent?key=${apiKey}`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({
@@ -574,6 +705,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
                     alert("您的瀏覽器不支援 Web Speech API。"); return;
                 }
+                clearLiveDraftTranslation();
                 if (recognitionRef.current) {
                     try { recognitionRef.current.stop(); } catch(e) {}
                 }
@@ -608,23 +740,33 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                         setActiveMode(null);
                         isListeningRef.current = false;
                         activeModeRef.current = null;
+                        clearLiveDraftTranslation();
                     }
                 };
 
                 recognition.onresult = async (event) => {
-                    let finalTranscript = ''; let interimTranscript = '';
+                    let finalTranscript = '';
+                    let interimTranscript = '';
                     for (let i = event.resultIndex; i < event.results.length; ++i) {
-                        if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
-                        else interimTranscript += event.results[i][0].transcript;
+                        const transcript = event.results[i][0].transcript || '';
+                        if (event.results[i].isFinal) finalTranscript += `${transcript} `;
+                        else interimTranscript += transcript;
                     }
-                    setInterimText(interimTranscript);
 
-                    if (finalTranscript) {
+                    const cleanedInterim = normalizeTranscriptForFallback(interimTranscript);
+                    setInterimText(cleanedInterim);
+                    if (cleanedInterim) {
+                        scheduleLiveDraftTranslation(mode, cleanedInterim);
+                    }
+
+                    const cleanedFinal = normalizeTranscriptForFallback(finalTranscript);
+                    if (cleanedFinal) {
+                        clearLiveDraftTranslation();
                         const newMsgId = Date.now();
                         const sender = mode === 'user' ? 'me' : 'partner';
-                        setMessages(prev => [...prev, { id: newMsgId, text: finalTranscript, translation: "翻譯中...", sender: sender, loading: true, mode: 'stream' }]);
+                        setMessages(prev => [...prev, { id: newMsgId, text: cleanedFinal, translation: "翻譯中...", sender: sender, loading: true, mode: 'stream', realtimeModel: FAST_TEXT_MODEL_NAME }]);
                         const sourceLangCode = mode === 'user' ? 'zh' : targetLang;
-                        const translation = await translateTextWithGemini(finalTranscript, sourceLangCode);
+                        const translation = await translateTextWithGemini(cleanedFinal, sourceLangCode, { realtime: true, modelName: FAST_TEXT_MODEL_NAME });
                         setMessages(prev => prev.map(msg => msg.id === newMsgId ? { ...msg, translation: translation, loading: false } : msg));
                         autoSpeakTranslation(translation, sender, newMsgId, mode);
                         setInterimText("");
@@ -759,7 +901,8 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 }
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') mediaRecorderRef.current.stop();
                 else setActiveMode(null);
-                setInterimText(""); 
+                setInterimText("");
+                clearLiveDraftTranslation();
                 if ('speechSynthesis' in window) window.speechSynthesis.cancel();
             };
 
@@ -985,8 +1128,8 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                         <div className="flex items-center gap-2">
                             <i className="fa-solid fa-language text-blue-400 text-xl md:text-2xl"></i>
                             <h1 className="font-bold text-lg md:text-2xl text-white whitespace-nowrap">口譯系統</h1>
-                            <span className="text-[10px] bg-slate-700/50 text-slate-300 px-2 py-0.5 rounded-full border border-slate-600 ml-1 truncate max-w-[80px]" title={MODEL_NAME}>
-                                {MODEL_NAME.replace('gemini-', '')}
+                            <span className="text-[10px] bg-slate-700/50 text-slate-300 px-2 py-0.5 rounded-full border border-slate-600 ml-1 truncate max-w-[120px]" title={`即時：${FAST_TEXT_MODEL_NAME} / 音訊：${AUDIO_MODEL_NAME}`}>
+                                即時:{FAST_TEXT_MODEL_NAME.replace('gemini-', '').replace('-lite', '-lite')}
                             </span>
                         </div>
                         
@@ -994,7 +1137,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                             <div className="relative">
                                 <select 
                                     value={targetLang} 
-                                    onChange={(e) => setTargetLang(e.target.value)}
+                                    onChange={(e) => { stopAll(); setTargetLang(e.target.value); }}
                                     className="appearance-none bg-slate-700 text-white text-sm md:text-base py-1 md:py-2 pl-3 md:pl-4 pr-8 md:pr-10 rounded border border-slate-600 focus:outline-none focus:border-blue-500"
                                 >
                                     <option value="ja">日本語</option>
@@ -1095,9 +1238,22 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                             </div>
                         ))}
                         {interimText && (
-                             <div className={`flex flex-col ${activeMode === 'user' ? 'items-end' : 'items-start'} opacity-70`}>
+                             <div className={`flex flex-col ${activeMode === 'user' ? 'items-end' : 'items-start'} opacity-80`}>
                                 <div className="max-w-[85%] md:max-w-[72%] rounded-2xl md:rounded-3xl p-4 md:p-6 border border-dashed border-slate-500 bg-slate-800/50">
-                                    <p className="text-sm text-slate-400 mb-1">正在聆聽...</p><p className="text-lg text-white animate-pulse">{interimText}</p>
+                                    <p className="text-sm text-slate-400 mb-1">正在聆聽 / 即時暫譯...</p>
+                                    <p className="text-lg text-white animate-pulse">{interimText}</p>
+                                    {(liveDraftTranslation || liveDraftLoading) && (
+                                        <>
+                                            <div className="h-px w-full my-2 bg-slate-600/70"></div>
+                                            <div className="flex items-start gap-2 text-slate-200">
+                                                <i className={`fa-solid fa-bolt mt-1 text-xs ${liveDraftLoading ? 'animate-pulse text-amber-300' : 'text-amber-300'}`}></i>
+                                                <p className={`font-bold text-lg md:text-xl ${liveDraftLoading && !liveDraftTranslation ? 'animate-pulse text-slate-400' : 'text-white'}`}>
+                                                    {liveDraftTranslation || '暫譯中...'}
+                                                </p>
+                                            </div>
+                                            <p className="text-[10px] text-slate-500 mt-1">暫譯不會自動朗讀，final 後會修正</p>
+                                        </>
+                                    )}
                                 </div>
                              </div>
                         )}
