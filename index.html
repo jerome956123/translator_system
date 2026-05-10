@@ -108,7 +108,8 @@
             const recognitionRef = useRef(null);
             const mediaRecorderRef = useRef(null);
             const messagesEndRef = useRef(null);
-            const backupTranscriptRef = useRef(""); 
+            const backupTranscriptRef = useRef("");
+            const backupInterimTranscriptRef = useRef("");
             const ttsPauseRef = useRef(false);
             const ttsSessionRef = useRef(0);
             const activeModeRef = useRef(null);
@@ -251,6 +252,61 @@
                     };
                     reader.readAsDataURL(blob);
                 });
+            };
+
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+            const normalizeTranscriptForFallback = (value = '') => {
+                return String(value || '')
+                    .replace(/\u3000/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .replace(/^[\s。！？!?.,，、；;：:「」『』"'()（）【】\[\]{}]+|[\s。！？!?.,，、；;：:「」『』"'()（）【】\[\]{}]+$/g, '')
+                    .trim();
+            };
+
+            const countCjkKanaHangul = (value = '') => {
+                return (String(value).match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) || []).length;
+            };
+
+            const countLatinWords = (value = '') => {
+                return (String(value).match(/[A-Za-zÀ-ÿ0-9]+/g) || []).length;
+            };
+
+            const isReliableBackupTranscript = (text, mode) => {
+                const cleaned = normalizeTranscriptForFallback(text);
+                if (!cleaned) return false;
+
+                const compact = cleaned.replace(/[\s。！？!?.,，、；;：:「」『』"'()（）【】\[\]{}]/g, '');
+                const fillerOnly = /^(嗯+|呃+|啊+|喔+|哦+|好+|是+|はい+|え+|あ+|うん+|はいはい+|yes|yeah|ok|okay)$/i.test(compact);
+                if (fillerOnly) return false;
+
+                const cjkCount = countCjkKanaHangul(cleaned);
+                const latinWordCount = countLatinWords(cleaned);
+                const nonSpaceLength = cleaned.replace(/\s/g, '').length;
+
+                // 備援翻譯只使用穩定 final transcript。太短的辨識很容易是雜音或尚未完成的片段，避免亂翻。
+                if (mode === 'user' || ['ja', 'ko'].includes(targetLang)) {
+                    return cjkCount >= 5 || nonSpaceLength >= 8 || latinWordCount >= 3;
+                }
+                return latinWordCount >= 3 || nonSpaceLength >= 10 || cjkCount >= 5;
+            };
+
+            const getStableBackupTranscript = (mode) => {
+                const finalText = normalizeTranscriptForFallback(backupTranscriptRef.current);
+                if (isReliableBackupTranscript(finalText, mode)) return { text: finalText, source: 'final' };
+                return { text: '', source: '' };
+            };
+
+            const isGeminiAudioResultUnusable = (result = {}) => {
+                const original = String(result.original || '');
+                const translation = String(result.translation || '');
+                return !original.trim() ||
+                    original === '[原文欄位空白]' ||
+                    original.includes('無法辨識') ||
+                    original.includes('音檔解析失敗') ||
+                    translation.includes('音訊處理失敗') ||
+                    translation.includes('音檔格式解析失敗') ||
+                    translation.includes('請檢查網路');
             };
 
             const pad2 = (value) => String(value).padStart(2, '0');
@@ -413,6 +469,33 @@
                 }
             };
 
+            const translateBackupTranscriptWithGemini = async (text, sourceLang) => {
+                const cleanedText = normalizeTranscriptForFallback(text);
+                if (!cleanedText) return "[備援辨識不足，請重新錄音]";
+
+                const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
+                const destLangName = sourceLang === 'zh' ? selectedLangConfig.promptName : 'Traditional Chinese';
+                const sourceLangName = sourceLang === 'zh' ? 'Traditional Chinese' : selectedLangConfig.promptName;
+                const systemPrompt = `You are translating a fallback speech-recognition transcript from ${sourceLangName} to ${destLangName}. Translate ONLY the exact transcript. Do not guess missing words. Do not add context. Do not summarize. If the transcript is too short, noisy, or unclear, output exactly: [備援辨識不足，請重新錄音]. Output ONLY the translated text.`;
+
+                const delays = [800, 1600, 3200];
+                for (let attempt = 0; attempt <= 3; attempt++) {
+                    try {
+                        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${apiKey}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\nFallback transcript: "${cleanedText}"` }] }] })
+                        });
+                        const data = await response.json();
+                        if (data.error) throw new Error(data.error.message);
+                        return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "[備援翻譯失敗]";
+                    } catch (error) {
+                        if (attempt < 3) await sleep(delays[attempt]);
+                        else return "[連線錯誤，請檢查金鑰或網路]";
+                    }
+                }
+            };
+
             const processAudioWithGemini = async (audioBase64, mode, messageId, mimeType = "audio/webm") => {
                 const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
                 const sourceLangName = mode === 'user' ? 'Mandarin Chinese' : selectedLangConfig.promptName;
@@ -559,6 +642,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                     mediaRecorderRef.current = mediaRecorder;
 
                     backupTranscriptRef.current = "";
+                    backupInterimTranscriptRef.current = "";
                     let backupRecognition = null;
                     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -569,11 +653,18 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                         backupRecognition.interimResults = true;
                         
                         backupRecognition.onresult = (event) => {
+                            let finalTranscript = '';
                             let interimTranscript = '';
-                            for (let i = event.resultIndex; i < event.results.length; ++i) {
-                                interimTranscript += event.results[i][0].transcript;
+                            for (let i = 0; i < event.results.length; ++i) {
+                                const transcript = event.results[i][0].transcript || '';
+                                if (event.results[i].isFinal) finalTranscript += transcript + ' ';
+                                else interimTranscript += transcript + ' ';
                             }
-                            backupTranscriptRef.current = interimTranscript;
+
+                            if (finalTranscript.trim()) {
+                                backupTranscriptRef.current = normalizeTranscriptForFallback(finalTranscript);
+                            }
+                            backupInterimTranscriptRef.current = normalizeTranscriptForFallback(interimTranscript);
                         };
                     }
 
@@ -593,6 +684,8 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                         
                         if (backupRecognition) {
                             try { backupRecognition.stop(); } catch(e) {}
+                            // 給 Web Speech 一點時間送出最後的 final transcript；不要立即使用尚未穩定的 interim 文字。
+                            await sleep(350);
                         }
 
                         if (localChunks.length === 0) return;
@@ -631,15 +724,18 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                             const base64Audio = await blobToBase64(audioBlob);
                             let result = await processAudioWithGemini(base64Audio, mode, tempMsgId, getAudioMimeCandidates(audioMimeType));
                             
-                            if ((result.original === "[原文欄位空白]" || result.original.includes("無法辨識")) && backupTranscriptRef.current.trim() !== "") {
-                                console.log("啟動雙引擎備援！");
-                                const backupText = backupTranscriptRef.current;
+                            const backupCandidate = getStableBackupTranscript(mode);
+                            if (isGeminiAudioResultUnusable(result) && backupCandidate.text) {
+                                console.log(`啟動穩定雙引擎備援（${backupCandidate.source} transcript）`);
+                                const backupText = backupCandidate.text;
                                 const sourceLangCode = mode === 'user' ? 'zh' : targetLang;
                                 
-                                setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: backupText, translation: "啟用備援翻譯中...", loading: true } : msg));
+                                setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: backupText, translation: "啟用穩定備援翻譯中...", loading: true } : msg));
                                 
-                                const fallbackTranslation = await translateTextWithGemini(backupText, sourceLangCode);
+                                const fallbackTranslation = await translateBackupTranscriptWithGemini(backupText, sourceLangCode);
                                 result = { original: backupText, translation: fallbackTranslation };
+                            } else if (isGeminiAudioResultUnusable(result) && backupInterimTranscriptRef.current) {
+                                console.warn("備援辨識只有暫時文字或內容太短，已略過，避免亂翻譯：", backupInterimTranscriptRef.current);
                             }
 
                             setMessages(prev => prev.map(msg => msg.id === tempMsgId ? { ...msg, text: result.original, translation: result.translation, loading: false } : msg));
@@ -1008,8 +1104,8 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                         <div ref={messagesEndRef} />
                     </div>
 
-                    <div className="bg-slate-800 p-4 md:p-6 border-t border-slate-700 safe-area-bottom">
-                        <div className="flex justify-between items-center mb-4 px-2">
+                    <div className="bg-slate-800 p-4 md:px-5 md:py-3 border-t border-slate-700 safe-area-bottom">
+                        <div className="flex justify-between items-center mb-4 md:mb-2 px-2">
                             <div className="bg-slate-900 p-1 rounded-lg inline-flex relative">
                                 <div className="absolute bg-slate-700 rounded-md transition-all duration-300 ease-out h-[calc(100%-8px)] top-1" style={{width: 'calc(50% - 4px)', left: appMode === 'stream' ? '4px' : 'calc(50%)'}}></div>
                                 <button onClick={() => {stopAll(); setAppMode('stream');}} className={`relative z-10 px-4 py-2 text-xs font-medium transition-colors rounded-md flex items-center gap-1 ${appMode === 'stream' ? 'text-white' : 'text-slate-400'}`}><i className="fa-solid fa-bolt"></i>即時</button>
@@ -1023,31 +1119,31 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-4 md:gap-6">
-                            <button {...getButtonEvents('user')} disabled={activeMode === 'partner'} className={`relative overflow-hidden rounded-xl md:rounded-2xl p-4 md:p-6 flex flex-col items-center justify-center transition-all duration-100 select-none ${activeMode === 'user' ? (appMode === 'stream' ? 'bg-blue-600 shadow-[0_0_15px_rgba(37,99,235,0.6)] scale-95' : 'bg-red-500 animate-pulse scale-95') : activeMode === 'partner' ? 'bg-slate-700 opacity-30 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-slate-200 active:bg-slate-600'} text-white touch-none`}>
-                                <div className={`text-2xl md:text-4xl mb-2 ${activeMode === 'user' && appMode === 'stream' ? 'mic-wave' : ''}`}><i className={`fa-solid ${activeMode === 'user' && appMode === 'record' ? 'fa-stop' : 'fa-microphone'}`}></i></div>
-                                <span className="font-bold text-sm md:text-lg flex flex-col items-center leading-tight">{activeMode === 'user' && appMode === 'record' ? (isPushToTalk ? '放開傳送' : '停止並傳送') : (isPushToTalk ? <><span className="text-base mb-1">中文</span><span className="text-[10px] font-normal opacity-80">(按住說話)</span></> : '中文')}</span>
+                        <div className="grid grid-cols-2 gap-4 md:gap-4">
+                            <button {...getButtonEvents('user')} disabled={activeMode === 'partner'} className={`relative overflow-hidden rounded-xl md:rounded-2xl p-4 md:py-3 md:px-4 flex flex-col items-center justify-center transition-all duration-100 select-none ${activeMode === 'user' ? (appMode === 'stream' ? 'bg-blue-600 shadow-[0_0_15px_rgba(37,99,235,0.6)] scale-95' : 'bg-red-500 animate-pulse scale-95') : activeMode === 'partner' ? 'bg-slate-700 opacity-30 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-slate-200 active:bg-slate-600'} text-white touch-none`}>
+                                <div className={`text-2xl md:text-3xl mb-2 md:mb-1 ${activeMode === 'user' && appMode === 'stream' ? 'mic-wave' : ''}`}><i className={`fa-solid ${activeMode === 'user' && appMode === 'record' ? 'fa-stop' : 'fa-microphone'}`}></i></div>
+                                <span className="font-bold text-sm md:text-base flex flex-col items-center leading-tight">{activeMode === 'user' && appMode === 'record' ? (isPushToTalk ? '放開傳送' : '停止並傳送') : (isPushToTalk ? <><span className="text-base mb-1">中文</span><span className="text-[10px] font-normal opacity-80">(按住說話)</span></> : '中文')}</span>
                             </button>
-                            <button {...getButtonEvents('partner')} disabled={activeMode === 'user'} className={`relative overflow-hidden rounded-xl md:rounded-2xl p-4 md:p-6 flex flex-col items-center justify-center transition-all duration-100 select-none ${activeMode === 'partner' ? (appMode === 'stream' ? 'bg-emerald-600 shadow-[0_0_15px_rgba(5,150,105,0.6)] scale-95' : 'bg-red-500 animate-pulse scale-95') : activeMode === 'user' ? 'bg-slate-700 opacity-30 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-slate-200 active:bg-slate-600'} text-white touch-none`}>
-                                <div className={`text-2xl md:text-4xl mb-2 ${activeMode === 'partner' && appMode === 'stream' ? 'mic-wave' : ''}`}><i className={`fa-solid ${activeMode === 'partner' && appMode === 'record' ? 'fa-stop' : 'fa-ear-listen'}`}></i></div>
-                                <span className="font-bold text-sm md:text-lg flex flex-col items-center leading-tight">{activeMode === 'partner' && appMode === 'record' ? (isPushToTalk ? '放開傳送' : '停止並傳送') : (isPushToTalk ? <><span className="text-base mb-1">{currentPartnerLangConfig.name}</span><span className="text-[10px] font-normal opacity-80">({currentPartnerLangConfig.instruction})</span></> : currentPartnerLangConfig.name)}</span>
+                            <button {...getButtonEvents('partner')} disabled={activeMode === 'user'} className={`relative overflow-hidden rounded-xl md:rounded-2xl p-4 md:py-3 md:px-4 flex flex-col items-center justify-center transition-all duration-100 select-none ${activeMode === 'partner' ? (appMode === 'stream' ? 'bg-emerald-600 shadow-[0_0_15px_rgba(5,150,105,0.6)] scale-95' : 'bg-red-500 animate-pulse scale-95') : activeMode === 'user' ? 'bg-slate-700 opacity-30 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-slate-200 active:bg-slate-600'} text-white touch-none`}>
+                                <div className={`text-2xl md:text-3xl mb-2 md:mb-1 ${activeMode === 'partner' && appMode === 'stream' ? 'mic-wave' : ''}`}><i className={`fa-solid ${activeMode === 'partner' && appMode === 'record' ? 'fa-stop' : 'fa-ear-listen'}`}></i></div>
+                                <span className="font-bold text-sm md:text-base flex flex-col items-center leading-tight">{activeMode === 'partner' && appMode === 'record' ? (isPushToTalk ? '放開傳送' : '停止並傳送') : (isPushToTalk ? <><span className="text-base mb-1">{currentPartnerLangConfig.name}</span><span className="text-[10px] font-normal opacity-80">({currentPartnerLangConfig.instruction})</span></> : currentPartnerLangConfig.name)}</span>
                             </button>
                         </div>
                         
                         {activeMode !== null && !isPushToTalk && (
-                            <div className="mt-4 flex justify-center animate-slideIn">
+                            <div className="mt-4 md:mt-2 flex justify-center animate-slideIn">
                                 <button 
                                     onClick={() => handleCutAndContinue(activeMode)}
                                     title="傳送此段並立刻接續"
-                                    className={`w-14 h-14 rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-90 active:-rotate-180 duration-300 text-white text-2xl ${activeMode === 'user' ? 'bg-blue-500 hover:bg-blue-400' : 'bg-emerald-500 hover:bg-emerald-400'}`}
+                                    className={`w-14 h-14 md:w-11 md:h-11 rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-90 active:-rotate-180 duration-300 text-white text-2xl md:text-xl ${activeMode === 'user' ? 'bg-blue-500 hover:bg-blue-400' : 'bg-emerald-500 hover:bg-emerald-400'}`}
                                 >
                                     <i className="fa-solid fa-arrows-rotate"></i>
                                 </button>
                             </div>
                         )}
                         
-                        <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-3 md:gap-4 mt-4">
-                            <div className="flex flex-wrap gap-3 md:gap-4">
+                        <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-3 md:gap-2 mt-4 md:mt-2">
+                            <div className="flex flex-wrap gap-3 md:gap-3">
                                 <button onClick={() => triggerUpload('user')} className="text-xs text-blue-400 hover:text-blue-300 transition flex items-center gap-1">
                                     <i className="fa-solid fa-file-audio"></i> 匯入中文
                                 </button>
@@ -1069,7 +1165,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                             )}
                         </div>
                         
-                        <div className="text-center mt-2 h-5">
+                        <div className="text-center mt-2 md:mt-1 h-5 md:h-4">
                             <p className="text-xs text-slate-400">{speakingId ? "正在朗讀譯文..." : activeMode ? (appMode === 'record' ? "正在錄音..." : "正在聆聽中...") : (isPushToTalk ? "按住上方按鈕開始" : "點擊上方按鈕開始")}</p>
                         </div>
                     </div>
