@@ -50,7 +50,10 @@
         const FAST_TEXT_MODEL_NAME = "gemini-3.1-flash-lite";
         const FAST_TEXT_FALLBACK_MODEL_NAME = "gemini-2.5-flash-lite";
         const MODEL_NAME = AUDIO_MODEL_NAME;
-        const LIVE_DRAFT_INTERVAL_MS = 900;
+        const LIVE_DRAFT_INTERVAL_MS = 650;
+        const LIVE_FINALIZE_SILENCE_MS = 1300;
+        const STREAM_RESTART_DELAY_MS = 350;
+        const CHINESE_STT_LANG = 'zh-TW';
 
         const SUPPORTED_LANGUAGES = {
             ja: { name: "日本語", promptName: "Japanese", sttLang: "ja-JP", ttsLang: "ja-JP", instruction: "長押しで話す" },
@@ -128,6 +131,9 @@
             const liveDraftPendingRef = useRef(null);
             const liveDraftLastStartedAtRef = useRef(0);
             const liveDraftTextRef = useRef("");
+            const liveFinalTranscriptRef = useRef("");
+            const liveFinalizeTimerRef = useRef(null);
+            const streamRestartTimerRef = useRef(null);
 
             const fileInputRef = useRef(null);
             const uploadSenderRef = useRef('user');
@@ -210,6 +216,7 @@
                 ttsSessionRef.current = currentTtsSession;
                 window.speechSynthesis.cancel();
                 setSpeakingId(null);
+                let ttsWatchdogTimer = null;
 
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.lang = lang; 
@@ -222,21 +229,31 @@
 
                 const finishSpeaking = () => {
                     if (currentTtsSession !== ttsSessionRef.current) return;
+                    if (ttsWatchdogTimer) {
+                        clearTimeout(ttsWatchdogTimer);
+                        ttsWatchdogTimer = null;
+                    }
                     setSpeakingId(null);
                     if (shouldPauseRecognition) {
                         setTimeout(() => {
                             ttsPauseRef.current = false;
                             const modeToResume = resumeMode || activeModeRef.current;
                             if (modeToResume && appModeRef.current === 'stream' && isListeningRef.current && !isPushToTalkRef.current) {
-                                startListeningStream(modeToResume);
+                                scheduleStreamRestart(modeToResume, 180, true);
                             }
-                        }, 300);
+                        }, 180);
                     }
                 };
 
                 utterance.onstart = () => setSpeakingId(id);
                 utterance.onend = finishSpeaking;
                 utterance.onerror = finishSpeaking;
+
+                if (shouldPauseRecognition) {
+                    const estimatedTtsMs = Math.min(18000, Math.max(3500, String(text).length * (lang && lang.startsWith('zh') ? 115 : 95)));
+                    // 某些瀏覽器偶爾不觸發 speechSynthesis.onend，會造成即時聆聽卡住；這裡強制保險恢復。
+                    ttsWatchdogTimer = setTimeout(finishSpeaking, estimatedTtsMs);
+                }
 
                 try {
                     window.speechSynthesis.speak(utterance);
@@ -490,6 +507,81 @@
                 setLiveDraftTranslation("");
             };
 
+            const clearLiveFinalizeTimer = () => {
+                if (liveFinalizeTimerRef.current) {
+                    clearTimeout(liveFinalizeTimerRef.current);
+                    liveFinalizeTimerRef.current = null;
+                }
+            };
+
+            const clearStreamRestartTimer = () => {
+                if (streamRestartTimerRef.current) {
+                    clearTimeout(streamRestartTimerRef.current);
+                    streamRestartTimerRef.current = null;
+                }
+            };
+
+            const resetLiveStreamBuffers = () => {
+                clearLiveFinalizeTimer();
+                liveFinalTranscriptRef.current = "";
+                setInterimText("");
+                clearLiveDraftTranslation();
+            };
+
+            const getStreamRecognitionLang = (mode) => {
+                const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
+                // Chrome / Edge 對中文通常用 zh-TW 比 cmn-Hant-TW 穩定，較不容易產生奇怪的逐字稿。
+                return mode === 'user' ? CHINESE_STT_LANG : selectedLangConfig.sttLang;
+            };
+
+            const scheduleStreamRestart = (mode, delay = STREAM_RESTART_DELAY_MS, preserveBuffers = true) => {
+                clearStreamRestartTimer();
+                streamRestartTimerRef.current = setTimeout(() => {
+                    streamRestartTimerRef.current = null;
+                    if (activeModeRef.current === mode && isListeningRef.current && appModeRef.current === 'stream' && !isPushToTalkRef.current) {
+                        startListeningStream(mode, { preserveBuffers, autoRestart: true });
+                    }
+                }, delay);
+            };
+
+            const flushLiveFinalTranscript = async (mode) => {
+                clearLiveFinalizeTimer();
+                const finalText = normalizeTranscriptForFallback(liveFinalTranscriptRef.current);
+                liveFinalTranscriptRef.current = "";
+
+                if (!finalText) {
+                    setInterimText("");
+                    clearLiveDraftTranslation();
+                    return;
+                }
+
+                if (!isTranslatableLiveText(finalText, mode)) {
+                    setInterimText("");
+                    clearLiveDraftTranslation();
+                    return;
+                }
+
+                setInterimText("");
+                clearLiveDraftTranslation();
+
+                const newMsgId = Date.now();
+                const sender = mode === 'user' ? 'me' : 'partner';
+                setMessages(prev => [...prev, { id: newMsgId, text: finalText, translation: "翻譯中...", sender: sender, loading: true, mode: 'stream', realtimeModel: FAST_TEXT_MODEL_NAME }]);
+
+                const sourceLangCode = mode === 'user' ? 'zh' : targetLang;
+                const translation = await translateTextWithGemini(finalText, sourceLangCode, { realtime: true, modelName: FAST_TEXT_MODEL_NAME });
+                setMessages(prev => prev.map(msg => msg.id === newMsgId ? { ...msg, translation: translation, loading: false } : msg));
+                autoSpeakTranslation(translation, sender, newMsgId, mode);
+            };
+
+            const scheduleLiveFinalization = (mode, delay = LIVE_FINALIZE_SILENCE_MS) => {
+                clearLiveFinalizeTimer();
+                liveFinalizeTimerRef.current = setTimeout(() => {
+                    liveFinalizeTimerRef.current = null;
+                    flushLiveFinalTranscript(mode);
+                }, delay);
+            };
+
             const translateTextWithGemini = async (text, sourceLang, options = {}) => {
                 const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
                 const destLangName = sourceLang === 'zh' ? selectedLangConfig.promptName : 'Traditional Chinese';
@@ -701,20 +793,25 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 return { original: "[音檔解析失敗]", translation: getFriendlyAudioError(lastErrorMessage) };
             };
 
-            const startListeningStream = (mode) => {
+            const startListeningStream = (mode, options = {}) => {
                 if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
                     alert("您的瀏覽器不支援 Web Speech API。"); return;
                 }
-                clearLiveDraftTranslation();
+                const { preserveBuffers = false } = options;
+                clearStreamRestartTimer();
+                if (!preserveBuffers) resetLiveStreamBuffers();
+
+                setIsListening(true);
+                setActiveMode(mode);
+                isListeningRef.current = true;
+                activeModeRef.current = mode;
+
                 if (recognitionRef.current) {
-                    try { recognitionRef.current.stop(); } catch(e) {}
+                    try { recognitionRef.current.onend = null; recognitionRef.current.stop(); } catch(e) {}
                 }
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 const recognition = new SpeechRecognition();
-                
-                const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
-                recognition.lang = mode === 'user' ? 'cmn-Hant-TW' : selectedLangConfig.sttLang;
-                
+                recognition.lang = getStreamRecognitionLang(mode);
                 recognition.continuous = true;
                 recognition.interimResults = true;
 
@@ -724,56 +821,59 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                     isListeningRef.current = true;
                     activeModeRef.current = mode;
                 };
-                recognition.onerror = (e) => { if (e.error === 'not-allowed') { stopAll(); alert("請允許麥克風權限"); } };
+                recognition.onerror = (e) => { 
+                    if (e.error === 'not-allowed') { stopAll(); alert("請允許麥克風權限"); }
+                    else if (e.error !== 'aborted' && isListeningRef.current && !isPushToTalkRef.current) {
+                        scheduleStreamRestart(mode, 700, true);
+                    }
+                };
                 recognition.onend = () => {
-                    // 自動朗讀時會短暫暫停語音辨識，避免喇叭聲被再次聽進去造成回音循環
+                    if (recognitionRef.current === recognition) recognitionRef.current = null;
+                    // 自動朗讀時會短暫暫停語音辨識，避免喇叭聲被再次聽進去造成回音循環；朗讀結束會用保險機制重啟。
                     if (ttsPauseRef.current) return;
 
                     if (isListeningRef.current && !isPushToTalkRef.current) {
-                        setTimeout(() => {
-                            if (activeModeRef.current === mode && isListeningRef.current && appModeRef.current === 'stream') {
-                                try { recognition.start(); } catch(e) { stopAll(); }
-                            }
-                        }, 500);
+                        if (liveFinalTranscriptRef.current) scheduleLiveFinalization(mode, 180);
+                        scheduleStreamRestart(mode, STREAM_RESTART_DELAY_MS, true);
                     } else {
                         setIsListening(false); 
                         setActiveMode(null);
                         isListeningRef.current = false;
                         activeModeRef.current = null;
-                        clearLiveDraftTranslation();
+                        resetLiveStreamBuffers();
                     }
                 };
 
-                recognition.onresult = async (event) => {
+                recognition.onresult = (event) => {
                     let finalTranscript = '';
                     let interimTranscript = '';
                     for (let i = event.resultIndex; i < event.results.length; ++i) {
                         const transcript = event.results[i][0].transcript || '';
                         if (event.results[i].isFinal) finalTranscript += `${transcript} `;
-                        else interimTranscript += transcript;
+                        else interimTranscript += `${transcript} `;
+                    }
+
+                    const cleanedFinalDelta = normalizeTranscriptForFallback(finalTranscript);
+                    if (cleanedFinalDelta) {
+                        liveFinalTranscriptRef.current = normalizeTranscriptForFallback(`${liveFinalTranscriptRef.current} ${cleanedFinalDelta}`);
+                        scheduleLiveFinalization(mode);
                     }
 
                     const cleanedInterim = normalizeTranscriptForFallback(interimTranscript);
-                    setInterimText(cleanedInterim);
-                    if (cleanedInterim) {
-                        scheduleLiveDraftTranslation(mode, cleanedInterim);
-                    }
-
-                    const cleanedFinal = normalizeTranscriptForFallback(finalTranscript);
-                    if (cleanedFinal) {
-                        clearLiveDraftTranslation();
-                        const newMsgId = Date.now();
-                        const sender = mode === 'user' ? 'me' : 'partner';
-                        setMessages(prev => [...prev, { id: newMsgId, text: cleanedFinal, translation: "翻譯中...", sender: sender, loading: true, mode: 'stream', realtimeModel: FAST_TEXT_MODEL_NAME }]);
-                        const sourceLangCode = mode === 'user' ? 'zh' : targetLang;
-                        const translation = await translateTextWithGemini(cleanedFinal, sourceLangCode, { realtime: true, modelName: FAST_TEXT_MODEL_NAME });
-                        setMessages(prev => prev.map(msg => msg.id === newMsgId ? { ...msg, translation: translation, loading: false } : msg));
-                        autoSpeakTranslation(translation, sender, newMsgId, mode);
-                        setInterimText("");
+                    const previewText = normalizeTranscriptForFallback(`${liveFinalTranscriptRef.current} ${cleanedInterim}`);
+                    setInterimText(previewText);
+                    if (previewText) {
+                        scheduleLiveDraftTranslation(mode, previewText);
                     }
                 };
+
                 recognitionRef.current = recognition;
-                recognition.start();
+                try {
+                    recognition.start();
+                } catch(e) {
+                    console.warn('語音辨識啟動失敗，稍後重試', e);
+                    scheduleStreamRestart(mode, 600, preserveBuffers);
+                }
             };
 
             const startRecordingAudio = async (mode) => {
@@ -896,13 +996,14 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 activeModeRef.current = null;
                 ttsPauseRef.current = false;
                 ttsSessionRef.current += 1;
+                clearStreamRestartTimer();
+                resetLiveStreamBuffers();
                 if (recognitionRef.current) {
-                    try { recognitionRef.current.stop(); } catch(e) {}
+                    try { recognitionRef.current.onend = null; recognitionRef.current.stop(); } catch(e) {}
+                    recognitionRef.current = null;
                 }
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') mediaRecorderRef.current.stop();
                 else setActiveMode(null);
-                setInterimText("");
-                clearLiveDraftTranslation();
                 if ('speechSynthesis' in window) window.speechSynthesis.cancel();
             };
 
@@ -910,7 +1011,9 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
                     mediaRecorderRef.current.stop();
                 } else if (recognitionRef.current) {
-                    recognitionRef.current.stop();
+                    try { recognitionRef.current.onend = null; recognitionRef.current.stop(); } catch(e) {}
+                    recognitionRef.current = null;
+                    if (appMode === 'stream' && liveFinalTranscriptRef.current) flushLiveFinalTranscript(mode);
                 }
 
                 setTimeout(() => {
