@@ -53,6 +53,11 @@
         const LIVE_DRAFT_INTERVAL_MS = 650;
         const LIVE_FINALIZE_SILENCE_MS = 1300;
         const STREAM_RESTART_DELAY_MS = 350;
+        const STREAM_WATCHDOG_INTERVAL_MS = 3000;
+        const STREAM_STALL_MS = 9000;
+        const AI_STREAM_CHUNK_MS = 6500;
+        const AI_STREAM_RESTART_GAP_MS = 120;
+        const AI_STREAM_CONTEXT_CHARS = 260;
         const CHINESE_STT_LANG = 'zh-TW';
 
         const SUPPORTED_LANGUAGES = {
@@ -103,7 +108,7 @@
             };
 
             const [messages, setMessages] = useState([]);
-            const [appMode, setAppMode] = useState('stream'); 
+            const [appMode, setAppMode] = useState('aiStream'); 
             const [isPushToTalk, setIsPushToTalk] = useState(false);
             const [isListening, setIsListening] = useState(false);
             const [isRecording, setIsRecording] = useState(false);
@@ -134,6 +139,15 @@
             const liveFinalTranscriptRef = useRef("");
             const liveFinalizeTimerRef = useRef(null);
             const streamRestartTimerRef = useRef(null);
+            const streamWatchdogTimerRef = useRef(null);
+            const streamLastActivityAtRef = useRef(0);
+            const aiStreamRef = useRef({ stream: null, recorder: null, chunks: [], mode: null, mimeType: 'audio/webm', segmentIndex: 0 });
+            const aiStreamRunningRef = useRef(false);
+            const aiStreamSegmentTimerRef = useRef(null);
+            const aiStreamRestartTimerRef = useRef(null);
+            const aiStreamQueueRef = useRef([]);
+            const aiStreamProcessingRef = useRef(false);
+            const aiStreamContextRef = useRef('');
 
             const fileInputRef = useRef(null);
             const uploadSenderRef = useRef('user');
@@ -167,7 +181,7 @@
                 if (!text || typeof text !== 'string') return false;
                 const trimmed = text.trim();
                 if (!trimmed) return false;
-                const blockedKeywords = ['翻譯失敗', '連線錯誤', '網路連線', '請檢查', '音訊處理失敗', '匯入音檔解析失敗', '欄位空白', '毫無回應'];
+                const blockedKeywords = ['翻譯失敗', '連線錯誤', '網路連線', '請檢查', '音訊處理失敗', '匯入音檔解析失敗', '欄位空白', '毫無回應', '無清楚語音'];
                 return !trimmed.startsWith('[') && !blockedKeywords.some(keyword => trimmed.includes(keyword));
             };
 
@@ -265,6 +279,9 @@
 
             const autoSpeakTranslation = (translation, sender, id, sourceMode = null) => {
                 if (!autoPlayTranslationRef.current || !isSpeakableTranslation(translation)) return;
+                // AI即時模式會持續錄音；若自動朗讀，喇叭聲很容易被下一段音訊收進去造成自我翻譯循環。
+                // 因此連續 AI 即時錄音中先不自動朗讀，仍可在訊息完成後手動點喇叭播放。
+                if (sourceMode === 'aiStream' && aiStreamRunningRef.current) return;
                 const ttsLang = getTtsLangForSender(sender);
                 const pauseRecognition = appModeRef.current === 'stream' && recognitionRef.current && activeModeRef.current && !isPushToTalkRef.current;
                 setTimeout(() => {
@@ -333,6 +350,8 @@
                     original === '[原文欄位空白]' ||
                     original.includes('無法辨識') ||
                     original.includes('音檔解析失敗') ||
+                    original.includes('無清楚語音') ||
+                    translation.includes('無清楚語音') ||
                     translation.includes('音訊處理失敗') ||
                     translation.includes('音檔格式解析失敗') ||
                     translation.includes('請檢查網路');
@@ -458,6 +477,12 @@
                 return [...new Set(candidates.filter(Boolean))];
             };
 
+            const getPreferredRecordingMimeType = () => {
+                if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
+                const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+                return candidates.find(type => MediaRecorder.isTypeSupported(type)) || '';
+            };
+
             const isLikelyAudioFormatError = (message = '') => {
                 return /mime|media|audio|video|format|decode|unsupported|invalid|file|payload/i.test(String(message));
             };
@@ -519,6 +544,39 @@
                     clearTimeout(streamRestartTimerRef.current);
                     streamRestartTimerRef.current = null;
                 }
+            };
+
+            const clearStreamWatchdogTimer = () => {
+                if (streamWatchdogTimerRef.current) {
+                    clearTimeout(streamWatchdogTimerRef.current);
+                    streamWatchdogTimerRef.current = null;
+                }
+            };
+
+            const startStreamWatchdog = (mode) => {
+                clearStreamWatchdogTimer();
+                streamWatchdogTimerRef.current = setTimeout(() => {
+                    streamWatchdogTimerRef.current = null;
+                    if (appModeRef.current !== 'stream' || activeModeRef.current !== mode || !isListeningRef.current || isPushToTalkRef.current) return;
+
+                    if (ttsPauseRef.current) {
+                        startStreamWatchdog(mode);
+                        return;
+                    }
+
+                    const inactiveMs = Date.now() - streamLastActivityAtRef.current;
+                    const recognitionMissing = !recognitionRef.current;
+                    if (recognitionMissing || inactiveMs > STREAM_STALL_MS) {
+                        console.warn('即時文字辨識疑似停住，自動重啟。inactiveMs=', inactiveMs);
+                        if (recognitionRef.current) {
+                            try { recognitionRef.current.onend = null; recognitionRef.current.stop(); } catch(e) {}
+                            recognitionRef.current = null;
+                        }
+                        scheduleStreamRestart(mode, 120, true);
+                    } else {
+                        startStreamWatchdog(mode);
+                    }
+                }, STREAM_WATCHDOG_INTERVAL_MS);
             };
 
             const resetLiveStreamBuffers = () => {
@@ -719,19 +777,25 @@
                 }
             };
 
-            const processAudioWithGemini = async (audioBase64, mode, messageId, mimeType = "audio/webm") => {
+            const processAudioWithGemini = async (audioBase64, mode, messageId, mimeType = "audio/webm", options = {}) => {
                 const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
                 const sourceLangName = mode === 'user' ? 'Mandarin Chinese' : selectedLangConfig.promptName;
                 const destLangName = mode === 'user' ? selectedLangConfig.promptName : 'Traditional Chinese';
                 const mimeCandidates = Array.isArray(mimeType) ? [...new Set(mimeType.filter(Boolean))] : getAudioMimeCandidates(mimeType);
+                const { previousContext = '', liveAudio = false } = options;
                 let lastErrorMessage = '';
                 
                 const transcribeInstruction = mode === 'user' ? "Transcribe exactly in Traditional Chinese (繁體中文)." : `Transcribe exactly in ${selectedLangConfig.promptName}.`;
                 
+                const contextInstruction = previousContext
+                    ? `\nPrevious transcript context for continuity only. Do not repeat it in the output: "${previousContext}"`
+                    : '';
                 const systemPrompt = `You are a simultaneous interpreter.
 1. Listen to the audio (${sourceLangName}).
 2. ${transcribeInstruction}
 3. Translate to ${destLangName}.
+4. ${liveAudio ? 'This is one short segment from a continuous conversation. Use previous context only to disambiguate homophones and terminology. Do not invent missing content.' : 'Translate the complete audio faithfully.'}
+5. If this segment contains no clear speech, output JSON with transcription "[無清楚語音]" and translation "[無清楚語音]".${contextInstruction}
 Output strictly in valid JSON format with only two keys: "transcription" and "translation". Do not include markdown code blocks.`;
 
                 const delays = [800, 1600, 3200];
@@ -799,6 +863,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 }
                 const { preserveBuffers = false } = options;
                 clearStreamRestartTimer();
+                clearStreamWatchdogTimer();
                 if (!preserveBuffers) resetLiveStreamBuffers();
 
                 setIsListening(true);
@@ -820,6 +885,8 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                     setActiveMode(mode); 
                     isListeningRef.current = true;
                     activeModeRef.current = mode;
+                    streamLastActivityAtRef.current = Date.now();
+                    startStreamWatchdog(mode);
                 };
                 recognition.onerror = (e) => { 
                     if (e.error === 'not-allowed') { stopAll(); alert("請允許麥克風權限"); }
@@ -828,6 +895,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                     }
                 };
                 recognition.onend = () => {
+                    clearStreamWatchdogTimer();
                     if (recognitionRef.current === recognition) recognitionRef.current = null;
                     // 自動朗讀時會短暫暫停語音辨識，避免喇叭聲被再次聽進去造成回音循環；朗讀結束會用保險機制重啟。
                     if (ttsPauseRef.current) return;
@@ -845,6 +913,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 };
 
                 recognition.onresult = (event) => {
+                    streamLastActivityAtRef.current = Date.now();
                     let finalTranscript = '';
                     let interimTranscript = '';
                     for (let i = event.resultIndex; i < event.results.length; ++i) {
@@ -876,10 +945,215 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 }
             };
 
+            const clearAIStreamTimers = () => {
+                if (aiStreamSegmentTimerRef.current) {
+                    clearTimeout(aiStreamSegmentTimerRef.current);
+                    aiStreamSegmentTimerRef.current = null;
+                }
+                if (aiStreamRestartTimerRef.current) {
+                    clearTimeout(aiStreamRestartTimerRef.current);
+                    aiStreamRestartTimerRef.current = null;
+                }
+            };
+
+            const stopAIStreamAudio = (updateState = true) => {
+                aiStreamRunningRef.current = false;
+                clearAIStreamTimers();
+                const session = aiStreamRef.current;
+
+                if (session?.recorder && session.recorder.state !== 'inactive') {
+                    try { session.recorder.stop(); } catch(e) {}
+                }
+                if (session?.stream) {
+                    try { session.stream.getTracks().forEach(track => track.stop()); } catch(e) {}
+                }
+
+                if (mediaRecorderRef.current === session?.recorder) {
+                    mediaRecorderRef.current = null;
+                }
+                aiStreamRef.current = { stream: null, recorder: null, chunks: [], mode: null, mimeType: 'audio/webm', segmentIndex: session?.segmentIndex || 0 };
+
+                if (updateState) {
+                    setIsListening(false);
+                    setIsRecording(false);
+                    setActiveMode(null);
+                    isListeningRef.current = false;
+                    activeModeRef.current = null;
+                }
+            };
+
+            const updateAIStreamContext = (text) => {
+                const cleaned = normalizeTranscriptForFallback(text);
+                if (!cleaned || cleaned.includes('音檔解析失敗') || cleaned.includes('無清楚語音')) return;
+                const combined = normalizeTranscriptForFallback(`${aiStreamContextRef.current} ${cleaned}`);
+                aiStreamContextRef.current = combined.slice(-AI_STREAM_CONTEXT_CHARS);
+            };
+
+            const processAIStreamQueue = async () => {
+                if (aiStreamProcessingRef.current) return;
+                aiStreamProcessingRef.current = true;
+
+                while (aiStreamQueueRef.current.length > 0) {
+                    const item = aiStreamQueueRef.current.shift();
+                    setMessages(prev => prev.map(msg => msg.id === item.id ? { ...msg, text: `AI 正在解析第 ${item.segmentIndex} 段音訊...`, translation: 'Gemini 正在聽打與翻譯...', loading: true } : msg));
+
+                    try {
+                        const base64Audio = await blobToBase64(item.blob);
+                        const result = await processAudioWithGemini(base64Audio, item.mode, item.id, item.mimeCandidates, {
+                            liveAudio: true,
+                            previousContext: aiStreamContextRef.current
+                        });
+
+                        const unusable = isGeminiAudioResultUnusable(result);
+                        const noClearSpeech = String(result.original || '').includes('無清楚語音') && String(result.translation || '').includes('無清楚語音');
+                        if (noClearSpeech) {
+                            setMessages(prev => prev.filter(msg => msg.id !== item.id));
+                            continue;
+                        }
+                        if (!unusable) updateAIStreamContext(result.original);
+
+                        setMessages(prev => prev.map(msg => msg.id === item.id ? {
+                            ...msg,
+                            text: result.original,
+                            translation: result.translation,
+                            loading: false
+                        } : msg));
+
+                        if (!unusable) autoSpeakTranslation(result.translation, item.sender, item.id, item.mode);
+                    } catch (error) {
+                        console.warn('AI 即時音訊片段處理失敗', error);
+                        setMessages(prev => prev.map(msg => msg.id === item.id ? { ...msg, text: '錯誤', translation: 'AI 即時音訊處理失敗', loading: false } : msg));
+                    }
+                }
+
+                aiStreamProcessingRef.current = false;
+                if (aiStreamQueueRef.current.length > 0) {
+                    processAIStreamQueue();
+                }
+            };
+
+            const enqueueAIStreamSegment = (blob, mode, segmentIndex, mimeType) => {
+                if (!blob || blob.size < 900) return;
+                const tempMsgId = Date.now() + segmentIndex;
+                const sender = mode === 'user' ? 'me' : 'partner';
+                const audioUrl = URL.createObjectURL(blob);
+                const audioMimeType = normalizeAudioMimeType(mimeType || blob.type || 'audio/webm');
+                const audioFileName = createAudioFilename(sender, tempMsgId, audioMimeType);
+                const mimeCandidates = getAudioMimeCandidates(audioMimeType);
+
+                setMessages(prev => [...prev, {
+                    id: tempMsgId,
+                    text: `AI 即時音訊第 ${segmentIndex} 段等待處理...`,
+                    translation: '排隊處理中...',
+                    sender,
+                    loading: true,
+                    mode: 'aiStream',
+                    audioUrl,
+                    audioMimeType,
+                    audioFileName,
+                    segmentIndex
+                }]);
+
+                aiStreamQueueRef.current.push({ id: tempMsgId, blob, mode, sender, segmentIndex, mimeCandidates });
+                processAIStreamQueue();
+            };
+
+            const startAIStreamSegment = () => {
+                const session = aiStreamRef.current;
+                if (!aiStreamRunningRef.current || !session?.stream || !session.mode) return;
+                if (session.stream.getTracks().every(track => track.readyState === 'ended')) return;
+
+                const preferredMime = getPreferredRecordingMimeType();
+                const recorderOptions = preferredMime ? { mimeType: preferredMime } : undefined;
+                let recorder;
+                try {
+                    recorder = recorderOptions ? new MediaRecorder(session.stream, recorderOptions) : new MediaRecorder(session.stream);
+                } catch (error) {
+                    console.warn('AI 即時 MediaRecorder 啟動失敗', error);
+                    stopAIStreamAudio(true);
+                    alert('AI 即時錄音啟動失敗，請改用錄音模式或重新整理頁面。');
+                    return;
+                }
+
+                const chunks = [];
+                session.recorder = recorder;
+                session.chunks = chunks;
+                session.mimeType = recorder.mimeType || preferredMime || 'audio/webm';
+                aiStreamRef.current = session;
+                mediaRecorderRef.current = recorder;
+
+                recorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) chunks.push(event.data);
+                };
+
+                recorder.onstop = () => {
+                    if (aiStreamSegmentTimerRef.current) {
+                        clearTimeout(aiStreamSegmentTimerRef.current);
+                        aiStreamSegmentTimerRef.current = null;
+                    }
+
+                    const blob = new Blob(chunks, { type: session.mimeType || 'audio/webm' });
+                    const segmentIndex = session.segmentIndex + 1;
+                    session.segmentIndex = segmentIndex;
+                    enqueueAIStreamSegment(blob, session.mode, segmentIndex, session.mimeType || blob.type || 'audio/webm');
+
+                    if (aiStreamRunningRef.current && activeModeRef.current === session.mode && appModeRef.current === 'aiStream') {
+                        aiStreamRestartTimerRef.current = setTimeout(startAIStreamSegment, AI_STREAM_RESTART_GAP_MS);
+                    }
+                };
+
+                recorder.onerror = (event) => {
+                    console.warn('AI 即時錄音錯誤', event?.error || event);
+                    if (aiStreamRunningRef.current) {
+                        aiStreamRestartTimerRef.current = setTimeout(startAIStreamSegment, 600);
+                    }
+                };
+
+                try {
+                    recorder.start();
+                    aiStreamSegmentTimerRef.current = setTimeout(() => {
+                        if (recorder.state === 'recording') {
+                            try { recorder.stop(); } catch(e) {}
+                        }
+                    }, AI_STREAM_CHUNK_MS);
+                } catch (error) {
+                    console.warn('AI 即時錄音開始失敗', error);
+                    stopAIStreamAudio(true);
+                }
+            };
+
+            const startAIStreamAudio = async (mode) => {
+                try {
+                    clearStreamRestartTimer();
+                    clearStreamWatchdogTimer();
+                    resetLiveStreamBuffers();
+                    stopAIStreamAudio(false);
+
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    aiStreamRunningRef.current = true;
+                    aiStreamContextRef.current = '';
+                    aiStreamQueueRef.current = [];
+                    aiStreamProcessingRef.current = false;
+                    aiStreamRef.current = { stream, recorder: null, chunks: [], mode, mimeType: 'audio/webm', segmentIndex: 0 };
+
+                    setIsListening(true);
+                    setActiveMode(mode);
+                    isListeningRef.current = true;
+                    activeModeRef.current = mode;
+
+                    startAIStreamSegment();
+                } catch (error) {
+                    console.warn('AI 即時麥克風啟動失敗', error);
+                    alert('無法存取麥克風，請檢查權限。');
+                    stopAIStreamAudio(true);
+                }
+            };
+
             const startRecordingAudio = async (mode) => {
                 try {
                     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    const mediaRecorder = new MediaRecorder(stream);
+                    const preferredRecordingMimeType = getPreferredRecordingMimeType();
+                    const mediaRecorder = preferredRecordingMimeType ? new MediaRecorder(stream, { mimeType: preferredRecordingMimeType }) : new MediaRecorder(stream);
                     let localChunks = [];
                     mediaRecorderRef.current = mediaRecorder;
 
@@ -890,7 +1164,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                         backupRecognition = new SpeechRecognition();
                         const selectedLangConfig = SUPPORTED_LANGUAGES[targetLang];
-                        backupRecognition.lang = mode === 'user' ? 'cmn-Hant-TW' : selectedLangConfig.sttLang;
+                        backupRecognition.lang = mode === 'user' ? CHINESE_STT_LANG : selectedLangConfig.sttLang;
                         backupRecognition.continuous = true;
                         backupRecognition.interimResults = true;
                         
@@ -935,7 +1209,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                         const tempMsgId = Date.now();
                         const sender = mode === 'user' ? 'me' : 'partner';
                         
-                        const audioBlob = new Blob(localChunks, { type: 'audio/webm' });
+                        const audioBlob = new Blob(localChunks, { type: normalizeAudioMimeType(mediaRecorder.mimeType || preferredRecordingMimeType || 'audio/webm') });
                         const audioUrl = URL.createObjectURL(audioBlob);
                         const audioMimeType = audioBlob.type || 'audio/webm';
                         const audioFilename = createAudioFilename(sender, tempMsgId, audioMimeType);
@@ -997,17 +1271,35 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 ttsPauseRef.current = false;
                 ttsSessionRef.current += 1;
                 clearStreamRestartTimer();
+                clearStreamWatchdogTimer();
                 resetLiveStreamBuffers();
                 if (recognitionRef.current) {
                     try { recognitionRef.current.onend = null; recognitionRef.current.stop(); } catch(e) {}
                     recognitionRef.current = null;
                 }
-                if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') mediaRecorderRef.current.stop();
-                else setActiveMode(null);
+                if (aiStreamRunningRef.current || appModeRef.current === 'aiStream') {
+                    stopAIStreamAudio(false);
+                } else if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                    mediaRecorderRef.current.stop();
+                }
+                setActiveMode(null);
                 if ('speechSynthesis' in window) window.speechSynthesis.cancel();
             };
 
+            const startCurrentMode = (mode) => {
+                if (appMode === 'stream') startListeningStream(mode);
+                else if (appMode === 'aiStream') startAIStreamAudio(mode);
+                else startRecordingAudio(mode);
+            };
+
             const handleCutAndContinue = (mode) => {
+                if (appMode === 'aiStream') {
+                    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                        mediaRecorderRef.current.stop();
+                    }
+                    return;
+                }
+
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
                     mediaRecorderRef.current.stop();
                 } else if (recognitionRef.current) {
@@ -1017,11 +1309,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 }
 
                 setTimeout(() => {
-                    if (appMode === 'stream') {
-                        startListeningStream(mode);
-                    } else {
-                        startRecordingAudio(mode);
-                    }
+                    startCurrentMode(mode);
                 }, 300);
             };
 
@@ -1029,15 +1317,15 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                 if (activeMode === mode) { stopAll(); return; }
                 if (activeMode !== null) {
                     stopAll();
-                    setTimeout(() => { appMode === 'stream' ? startListeningStream(mode) : startRecordingAudio(mode); }, 200);
+                    setTimeout(() => { startCurrentMode(mode); }, 200);
                     return;
                 }
-                appMode === 'stream' ? startListeningStream(mode) : startRecordingAudio(mode);
+                startCurrentMode(mode);
             };
 
             const handlePTTStart = (mode) => {
                 if (activeMode) return;
-                appMode === 'stream' ? startListeningStream(mode) : startRecordingAudio(mode);
+                startCurrentMode(mode);
             };
 
             const getButtonEvents = (mode) => {
@@ -1161,7 +1449,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                         ...messages.map(msg => [
                             formatMessageTime(msg),
                             msg.sender === 'me' ? '我（中文）' : `對方（${languageLabel}）`,
-                            msg.mode === 'stream' ? '即時' : msg.mode === 'import' ? '匯入音檔' : '錄音',
+                            msg.mode === 'stream' ? '快速即時' : msg.mode === 'aiStream' ? 'AI即時' : msg.mode === 'import' ? '匯入音檔' : '錄音',
                             msg.text || '',
                             msg.translation || '',
                             msg.audioUrl ? '是' : '否',
@@ -1184,7 +1472,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
 
                 messages.forEach((msg, idx) => {
                     const speaker = msg.sender === 'me' ? '我（中文）' : `對方（${languageLabel}）`;
-                    const modeLabel = msg.mode === 'stream' ? '即時' : msg.mode === 'import' ? '匯入音檔' : '錄音';
+                    const modeLabel = msg.mode === 'stream' ? '快速即時' : msg.mode === 'aiStream' ? 'AI即時' : msg.mode === 'import' ? '匯入音檔' : '錄音';
                     lines.push(`[${idx + 1}] ${formatMessageTime(msg)}｜${speaker}｜${modeLabel}`);
                     lines.push(`原文：${msg.text || ''}`);
                     lines.push(`譯文：${msg.translation || ''}`);
@@ -1279,19 +1567,19 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                     <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-4 md:space-y-6 bg-slate-900 pb-8">
                         {messages.length === 0 && !interimText && (
                             <div className="h-full flex flex-col items-center justify-center text-slate-600 space-y-4 opacity-50">
-                                <i className={`fa-solid ${appMode === 'stream' ? 'fa-bolt' : 'fa-microphone-lines'} text-6xl mb-2`}></i>
-                                <p>目前模式：{appMode === 'stream' ? '即時口譯' : '精準錄音'}</p>
+                                <i className={`fa-solid ${appMode === 'stream' ? 'fa-bolt' : appMode === 'aiStream' ? 'fa-brain' : 'fa-microphone-lines'} text-6xl mb-2`}></i>
+                                <p>目前模式：{appMode === 'stream' ? '快速即時' : appMode === 'aiStream' ? 'AI即時' : '精準錄音'}</p>
                                 <p className="text-sm">{isPushToTalk ? '按住下方按鈕開始對話' : '點擊下方按鈕開始對話'}</p>
                             </div>
                         )}
                         {messages.map((msg, index) => (
                             <div key={msg.id} className={`flex flex-col ${msg.sender === 'me' ? 'items-end' : 'items-start'} message-enter`}>
                                 <div className={`max-w-[85%] md:max-w-[72%] rounded-2xl md:rounded-3xl p-4 md:p-6 shadow-lg border relative ${msg.sender === 'me' ? 'bg-blue-600/20 border-blue-500/30 text-blue-100 rounded-br-none' : 'bg-emerald-600/20 border-emerald-500/30 text-emerald-100 rounded-bl-none'}`}>
-                                    <span className="absolute top-2 right-2 text-[10px] opacity-40 uppercase tracking-wider border border-white/20 px-1 rounded">{msg.mode === 'stream' ? 'Live' : msg.mode === 'import' ? 'Import' : 'Audio'}</span>
+                                    <span className="absolute top-2 right-2 text-[10px] opacity-40 uppercase tracking-wider border border-white/20 px-1 rounded">{msg.mode === 'stream' ? 'Fast' : msg.mode === 'aiStream' ? 'AI Live' : msg.mode === 'import' ? 'Import' : 'Audio'}</span>
                                     <p className="text-sm opacity-70 mb-1 font-light">{msg.sender === 'me' ? '我 (中文)' : `對方 (${currentPartnerLangConfig.name})`}</p>
                                     
-                                    {msg.loading && (msg.mode === 'record' || msg.mode === 'import') ? (
-                                        <div className="flex items-center gap-2 mb-2 text-slate-300"><i className="fa-solid fa-circle-notch fa-spin"></i><span className="text-lg italic opacity-70">{msg.mode === 'import' ? '音檔解析中...' : '處理中...'}</span></div>
+                                    {msg.loading && (msg.mode === 'record' || msg.mode === 'import' || msg.mode === 'aiStream') ? (
+                                        <div className="flex items-center gap-2 mb-2 text-slate-300"><i className="fa-solid fa-circle-notch fa-spin"></i><span className="text-lg italic opacity-70">{msg.mode === 'aiStream' ? 'AI 音訊解析中...' : msg.mode === 'import' ? '音檔解析中...' : '處理中...'}</span></div>
                                     ) : (<p className="text-lg md:text-xl mb-2 leading-snug">{msg.text}</p>)}
                                     
                                     <div className={`h-px w-full my-2 ${msg.sender === 'me' ? 'bg-blue-500/30' : 'bg-emerald-500/30'}`}></div>
@@ -1366,9 +1654,9 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                     <div className="bg-slate-800 p-4 md:px-5 md:py-3 border-t border-slate-700 safe-area-bottom">
                         <div className="flex justify-between items-center mb-4 md:mb-2 px-2">
                             <div className="bg-slate-900 p-1 rounded-lg inline-flex relative">
-                                <div className="absolute bg-slate-700 rounded-md transition-all duration-300 ease-out h-[calc(100%-8px)] top-1" style={{width: 'calc(50% - 4px)', left: appMode === 'stream' ? '4px' : 'calc(50%)'}}></div>
-                                <button onClick={() => {stopAll(); setAppMode('stream');}} className={`relative z-10 px-4 py-2 text-xs font-medium transition-colors rounded-md flex items-center gap-1 ${appMode === 'stream' ? 'text-white' : 'text-slate-400'}`}><i className="fa-solid fa-bolt"></i>即時</button>
-                                <button onClick={() => {stopAll(); setAppMode('record');}} className={`relative z-10 px-4 py-2 text-xs font-medium transition-colors rounded-md flex items-center gap-1 ${appMode === 'record' ? 'text-white' : 'text-slate-400'}`}><i className="fa-solid fa-microphone-lines"></i>錄音</button>
+                                <button onClick={() => {stopAll(); setAppMode('stream');}} className={`relative z-10 px-3 md:px-4 py-2 text-xs font-medium transition-colors rounded-md flex items-center gap-1 ${appMode === 'stream' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200'}`} title="最快，但依賴瀏覽器逐字稿"><i className="fa-solid fa-bolt"></i>快速</button>
+                                <button onClick={() => {stopAll(); setAppMode('aiStream');}} className={`relative z-10 px-3 md:px-4 py-2 text-xs font-medium transition-colors rounded-md flex items-center gap-1 ${appMode === 'aiStream' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200'}`} title="分段錄音交給 AI 聽打翻譯，準確度較高"><i className="fa-solid fa-brain"></i>AI即時</button>
+                                <button onClick={() => {stopAll(); setAppMode('record');}} className={`relative z-10 px-3 md:px-4 py-2 text-xs font-medium transition-colors rounded-md flex items-center gap-1 ${appMode === 'record' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200'}`} title="手動錄完一段後精準翻譯"><i className="fa-solid fa-microphone-lines"></i>錄音</button>
                             </div>
                              <div className="flex items-center">
                                 <span className={`text-xs mr-2 font-medium ${isPushToTalk ? 'text-blue-400' : 'text-slate-500'}`}>{isPushToTalk ? '按住說話' : '點擊切換'}</span>
@@ -1379,13 +1667,13 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                         </div>
 
                         <div className="grid grid-cols-2 gap-4 md:gap-4">
-                            <button {...getButtonEvents('user')} disabled={activeMode === 'partner'} className={`relative overflow-hidden rounded-xl md:rounded-2xl p-4 md:py-3 md:px-4 flex flex-col items-center justify-center transition-all duration-100 select-none ${activeMode === 'user' ? (appMode === 'stream' ? 'bg-blue-600 shadow-[0_0_15px_rgba(37,99,235,0.6)] scale-95' : 'bg-red-500 animate-pulse scale-95') : activeMode === 'partner' ? 'bg-slate-700 opacity-30 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-slate-200 active:bg-slate-600'} text-white touch-none`}>
-                                <div className={`text-2xl md:text-3xl mb-2 md:mb-1 ${activeMode === 'user' && appMode === 'stream' ? 'mic-wave' : ''}`}><i className={`fa-solid ${activeMode === 'user' && appMode === 'record' ? 'fa-stop' : 'fa-microphone'}`}></i></div>
-                                <span className="font-bold text-sm md:text-base flex flex-col items-center leading-tight">{activeMode === 'user' && appMode === 'record' ? (isPushToTalk ? '放開傳送' : '停止並傳送') : (isPushToTalk ? <><span className="text-base mb-1">中文</span><span className="text-[10px] font-normal opacity-80">(按住說話)</span></> : '中文')}</span>
+                            <button {...getButtonEvents('user')} disabled={activeMode === 'partner'} className={`relative overflow-hidden rounded-xl md:rounded-2xl p-4 md:py-3 md:px-4 flex flex-col items-center justify-center transition-all duration-100 select-none ${activeMode === 'user' ? ((appMode === 'stream' || appMode === 'aiStream') ? 'bg-blue-600 shadow-[0_0_15px_rgba(37,99,235,0.6)] scale-95' : 'bg-red-500 animate-pulse scale-95') : activeMode === 'partner' ? 'bg-slate-700 opacity-30 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-slate-200 active:bg-slate-600'} text-white touch-none`}>
+                                <div className={`text-2xl md:text-3xl mb-2 md:mb-1 ${activeMode === 'user' && (appMode === 'stream' || appMode === 'aiStream') ? 'mic-wave' : ''}`}><i className={`fa-solid ${activeMode === 'user' && (appMode === 'record' || appMode === 'aiStream') ? 'fa-stop' : 'fa-microphone'}`}></i></div>
+                                <span className="font-bold text-sm md:text-base flex flex-col items-center leading-tight">{activeMode === 'user' && appMode === 'record' ? (isPushToTalk ? '放開傳送' : '停止並傳送') : activeMode === 'user' && appMode === 'aiStream' ? (isPushToTalk ? '放開停止' : '停止 AI 即時') : (isPushToTalk ? <><span className="text-base mb-1">中文</span><span className="text-[10px] font-normal opacity-80">(按住說話)</span></> : '中文')}</span>
                             </button>
-                            <button {...getButtonEvents('partner')} disabled={activeMode === 'user'} className={`relative overflow-hidden rounded-xl md:rounded-2xl p-4 md:py-3 md:px-4 flex flex-col items-center justify-center transition-all duration-100 select-none ${activeMode === 'partner' ? (appMode === 'stream' ? 'bg-emerald-600 shadow-[0_0_15px_rgba(5,150,105,0.6)] scale-95' : 'bg-red-500 animate-pulse scale-95') : activeMode === 'user' ? 'bg-slate-700 opacity-30 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-slate-200 active:bg-slate-600'} text-white touch-none`}>
-                                <div className={`text-2xl md:text-3xl mb-2 md:mb-1 ${activeMode === 'partner' && appMode === 'stream' ? 'mic-wave' : ''}`}><i className={`fa-solid ${activeMode === 'partner' && appMode === 'record' ? 'fa-stop' : 'fa-ear-listen'}`}></i></div>
-                                <span className="font-bold text-sm md:text-base flex flex-col items-center leading-tight">{activeMode === 'partner' && appMode === 'record' ? (isPushToTalk ? '放開傳送' : '停止並傳送') : (isPushToTalk ? <><span className="text-base mb-1">{currentPartnerLangConfig.name}</span><span className="text-[10px] font-normal opacity-80">({currentPartnerLangConfig.instruction})</span></> : currentPartnerLangConfig.name)}</span>
+                            <button {...getButtonEvents('partner')} disabled={activeMode === 'user'} className={`relative overflow-hidden rounded-xl md:rounded-2xl p-4 md:py-3 md:px-4 flex flex-col items-center justify-center transition-all duration-100 select-none ${activeMode === 'partner' ? ((appMode === 'stream' || appMode === 'aiStream') ? 'bg-emerald-600 shadow-[0_0_15px_rgba(5,150,105,0.6)] scale-95' : 'bg-red-500 animate-pulse scale-95') : activeMode === 'user' ? 'bg-slate-700 opacity-30 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-slate-200 active:bg-slate-600'} text-white touch-none`}>
+                                <div className={`text-2xl md:text-3xl mb-2 md:mb-1 ${activeMode === 'partner' && (appMode === 'stream' || appMode === 'aiStream') ? 'mic-wave' : ''}`}><i className={`fa-solid ${activeMode === 'partner' && (appMode === 'record' || appMode === 'aiStream') ? 'fa-stop' : 'fa-ear-listen'}`}></i></div>
+                                <span className="font-bold text-sm md:text-base flex flex-col items-center leading-tight">{activeMode === 'partner' && appMode === 'record' ? (isPushToTalk ? '放開傳送' : '停止並傳送') : activeMode === 'partner' && appMode === 'aiStream' ? (isPushToTalk ? '放開停止' : '停止 AI 即時') : (isPushToTalk ? <><span className="text-base mb-1">{currentPartnerLangConfig.name}</span><span className="text-[10px] font-normal opacity-80">({currentPartnerLangConfig.instruction})</span></> : currentPartnerLangConfig.name)}</span>
                             </button>
                         </div>
                         
@@ -1425,7 +1713,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                         </div>
                         
                         <div className="text-center mt-2 md:mt-1 h-5 md:h-4">
-                            <p className="text-xs text-slate-400">{speakingId ? "正在朗讀譯文..." : activeMode ? (appMode === 'record' ? "正在錄音..." : "正在聆聽中...") : (isPushToTalk ? "按住上方按鈕開始" : "點擊上方按鈕開始")}</p>
+                            <p className="text-xs text-slate-400">{speakingId ? "正在朗讀譯文..." : activeMode ? (appMode === 'record' ? "正在錄音..." : appMode === 'aiStream' ? "AI 即時分段聽打翻譯中..." : "正在聆聽中...") : (isPushToTalk ? "按住上方按鈕開始" : "點擊上方按鈕開始")}</p>
                         </div>
                     </div>
                 </div>
