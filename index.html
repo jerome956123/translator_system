@@ -120,7 +120,7 @@
             const [voices, setVoices] = useState([]);
             const [autoSegmentMode, setAutoSegmentMode] = useState(() => {
                 const savedMode = localStorage.getItem('auto_segment_mode');
-                return savedMode === '1' || savedMode === '5' ? savedMode : 'off';
+                return ['1', '5', '15'].includes(savedMode) ? savedMode : 'off';
             });
             const [segmentEndsAt, setSegmentEndsAt] = useState(null);
             const [nowTick, setNowTick] = useState(Date.now());
@@ -401,12 +401,14 @@
             const getAutoSegmentMs = () => {
                 if (autoSegmentModeRef.current === '1') return 60 * 1000;
                 if (autoSegmentModeRef.current === '5') return 5 * 60 * 1000;
+                if (autoSegmentModeRef.current === '15') return 15 * 60 * 1000;
                 return 0;
             };
 
             const getSegmentLabel = () => {
                 if (autoSegmentMode === '1') return '1分鐘';
                 if (autoSegmentMode === '5') return '5分鐘';
+                if (autoSegmentMode === '15') return '15分鐘';
                 return '關';
             };
 
@@ -440,7 +442,7 @@
             };
 
             const cycleAutoSegmentMode = () => {
-                const nextMode = autoSegmentMode === 'off' ? '1' : autoSegmentMode === '1' ? '5' : 'off';
+                const nextMode = autoSegmentMode === 'off' ? '1' : autoSegmentMode === '1' ? '5' : autoSegmentMode === '5' ? '15' : 'off';
                 setAutoSegmentMode(nextMode);
             };
 
@@ -1816,7 +1818,7 @@ Output strictly in valid JSON format with only two keys: "transcription" and "tr
                                     <button
                                         onClick={cycleAutoSegmentMode}
                                         className={`text-[11px] md:text-xs px-2 py-1.5 rounded-lg border transition flex items-center gap-1 whitespace-nowrap ${autoSegmentMode !== 'off' ? 'bg-amber-500/15 border-amber-400/40 text-amber-200' : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'}`}
-                                        title="點擊切換：關 → 1分鐘 → 5分鐘"
+                                        title="點擊切換：關 → 1分鐘 → 5分鐘 → 15分鐘"
                                     >
                                         <i className="fa-solid fa-scissors"></i>
                                         <span>{autoSegmentButtonText}</span>
