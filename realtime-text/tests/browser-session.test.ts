@@ -10,7 +10,8 @@ function harness(budgetUsd?: number, context?: string, pair?: LanguagePair) {
   const events: ServerMessage[] = [];
   let audio!: (data: ArrayBuffer) => void;
   let callbacks!: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onError: (text: string) => void };
-  const capture = { prepare: vi.fn(async () => {}), start: vi.fn(async (next: typeof audio) => { audio = next; }), stop: vi.fn(async () => {}) };
+  let captureError: ((message: string) => void) | undefined;
+  const capture = { prepare: vi.fn(async () => {}), start: vi.fn(async (next: typeof audio, onError?: (message: string) => void) => { audio = next; captureError = onError; }), stop: vi.fn(async () => {}) };
   const stt = { connect: vi.fn(async () => {}), sendAudio: vi.fn(() => true), endAudio: vi.fn(() => callbacks.onFinal('最後一句')), close: vi.fn() };
   const translate = vi.fn(async options => {
     options.onUsage('完整提示與前文', '訳文', 10, 2);
@@ -19,11 +20,49 @@ function harness(budgetUsd?: number, context?: string, pair?: LanguagePair) {
   const session = new BrowserTranslationSession({ apiKey: 'fake-key', direction: pair ? defaultDirection(pair) : 'zh-ja', pair, mode: 'saving', budgetUsd, context }, event => events.push(event), {
     capture, createSTT: next => { callbacks = next; return stt; }, translate,
   });
-  return { session, events, capture, stt, translate, get callbacks() { return callbacks; }, audio: (data: ArrayBuffer) => audio(data) };
+  return { session, events, capture, stt, translate, get callbacks() { return callbacks; }, audio: (data: ArrayBuffer) => audio(data), captureError: (message: string) => captureError?.(message) };
 }
 afterEach(() => vi.useRealTimers());
 
 describe('純前端場次生命週期', () => {
+  it('等待第一包音訊時不宣稱聆聽中，收音啟動失敗會釋放連線', async () => {
+    const h = harness(); let rejectCapture!: (error: Error) => void;
+    h.capture.start.mockImplementation(() => new Promise((_resolve, reject) => { rejectCapture = reject; }));
+    const starting = h.session.start();
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(h.events.some(event => event.type === 'status' && event.status === 'listening')).toBe(false);
+    rejectCapture(new Error('沒有送出音訊')); await starting;
+    expect(h.events.some(event => event.type === 'error' && event.message.includes('沒有送出音訊'))).toBe(true);
+    expect(h.stt.close).toHaveBeenCalled(); expect(h.capture.stop).toHaveBeenCalledWith(false);
+  });
+
+  it('音量依送出的 PCM 更新；有聲音但無辨識回覆時提示，恢復文字後解除提示', async () => {
+    vi.useFakeTimers(); const h = harness(); await h.session.start();
+    h.audio(new ArrayBuffer(3200));
+    expect(h.events.find(event => event.type === 'audio-level')).toMatchObject({ level: 0 });
+    await vi.advanceTimersByTimeAsync(16000);
+    for (let i = 0; i < 21; i++) h.audio(new Int16Array(1600).fill(2000).buffer);
+    expect(h.events.filter(event => event.type === 'warning')).toHaveLength(1);
+    expect(h.events.some(event => event.type === 'audio-level' && event.level > 0)).toBe(true);
+    h.callbacks.onInterim('測試');
+    expect(h.events.some(event => event.type === 'status' && event.message?.includes('已收到辨識文字'))).toBe(true);
+    h.session.dispose();
+  });
+
+  it('音軌或處理器中斷會停止，停止後的中斷事件不能重新改寫狀態', async () => {
+    const h = harness(); await h.session.start(); h.captureError('麥克風已中斷');
+    expect(h.events.some(event => event.type === 'error' && event.message === '麥克風已中斷')).toBe(true);
+    expect(h.capture.stop).toHaveBeenCalledWith(false);
+    const count = h.events.length; h.captureError('晚到的事件'); expect(h.events).toHaveLength(count);
+  });
+
+  it('收得到 PCM 但無法送到辨識服務時立即停止，不能顯示零用量繼續計時', async () => {
+    const h = harness(); await h.session.start(); h.stt.sendAudio.mockReturnValue(false);
+    h.audio(new ArrayBuffer(3200));
+    expect(h.events.some(event => event.type === 'error' && event.message.includes('未能傳送'))).toBe(true);
+    expect(h.capture.stop).toHaveBeenCalledWith(false);
+  });
+
   it('先依聲音標記處理純漢字日文，同句定稿沿用標記，下句中文不沿用上一句日文', async () => {
     vi.useFakeTimers(); const h=harness(undefined,undefined,'zh-ja');
     h.translate.mockImplementation(async options=>({original:options.text,text:'譯文',direction:options.direction}));

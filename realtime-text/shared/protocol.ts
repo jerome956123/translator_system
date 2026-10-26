@@ -16,6 +16,7 @@ export const LANGUAGE_PAIRS = {
 } as const;
 export type LanguagePair = keyof typeof LANGUAGE_PAIRS;
 export type Mode = 'saving' | 'fast';
+export type AudioSource = 'microphone' | 'display';
 
 export type ClientMessage =
   | { type: 'start'; sessionId: string; direction: Direction; mode: Mode; budgetUsd?: number }
@@ -33,6 +34,7 @@ export interface UsageSnapshot {
 
 export type ServerMessage =
   | { type: 'status'; sessionId: string; status: 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped'; message?: string }
+  | { type: 'audio-level'; sessionId: string; level: number }
   | { type: 'transcript'; sessionId: string; captionId: string; paragraphId?: string; direction?: Direction; rawText?: string; revision: number; text: string; final: boolean; receivedAt: number }
   | { type: 'translation'; sessionId: string; captionId: string; revision: number; requestId: string; direction?: Direction; text: string; final: boolean; firstTokenAt?: number }
   | { type: 'caption-correction'; sessionId: string; captionId: string; revision: number; direction?: Direction; original: string; translation: string; final: boolean; corrected: boolean }

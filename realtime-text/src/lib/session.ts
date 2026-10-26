@@ -1,5 +1,5 @@
 import { DIRECTIONS, type Direction, type Language, type ServerMessage } from '../../shared/protocol';
-import { AudioCapture } from '../audio/capture';
+import { AudioCapture, pcmLevel } from '../audio/capture';
 import { readableError } from './config';
 import { GeminiBrowserSTT, type STTConnection } from './stt';
 import { TranslationScheduler } from './scheduler';
@@ -12,7 +12,7 @@ import { directionSource, directionFor, isPairLanguage, languageFromCode, previe
 
 interface Capture {
   prepare: () => Promise<void>;
-  start: (onChunk: (chunk: ArrayBuffer) => void) => Promise<void>;
+  start: (onChunk: (chunk: ArrayBuffer) => void, onError?: (message: string) => void) => Promise<void>;
   stop: (flush?: boolean) => Promise<void>;
 }
 interface Dependencies {
@@ -34,6 +34,10 @@ export class BrowserTranslationSession {
   private started = false;
   private finishing?: Promise<void>;
   private lastUsage = 0;
+  private lastLevelAt = -Infinity;
+  private lastTranscriptAt = 0;
+  private signalSeconds = 0;
+  private warnedNoTranscript = false;
   private finalArrived?: () => void;
   private finishTimer?: ReturnType<typeof setTimeout>;
   private tasks = new Map<string, TranslationTask>();
@@ -43,7 +47,7 @@ export class BrowserTranslationSession {
   private speechAudioLanguage?: Language;
 
   constructor(private settings: SessionSettings, private emit: (event: ServerMessage) => void, dependencies: Dependencies = {}) {
-    this.capture = dependencies.capture ?? new AudioCapture();
+    this.capture = dependencies.capture ?? new AudioCapture(settings.audioSource);
     this.previousLanguage = directionSource(settings.direction);
     // 雙向對話的辨識輪次分開翻譯，避免不同語言／說話者黏成同一句；同方向仍合併顯示。
     this.assembler = new TranscriptAssembler(this.id, settings.direction, Date.now, !settings.pair);
@@ -137,7 +141,9 @@ export class BrowserTranslationSession {
   async start() {
     if (this.disposed || this.stopping || this.started) return;
     this.started = true;
-    this.status('connecting', '請允許麥克風，連線完成後再開始說話。');
+    this.status('connecting', this.settings.audioSource === 'display'
+      ? '請選擇播放中的分頁，並勾選「分享分頁音訊」。只會傳送音訊，不會傳送畫面。'
+      : '請允許麥克風，正在檢查收音與辨識連線。');
     try {
       // 先解鎖音訊處理，再等待網路；符合手機瀏覽器的使用者手勢要求。
       await this.capture.prepare();
@@ -145,14 +151,16 @@ export class BrowserTranslationSession {
       await this.stt.connect(this.settings.apiKey, this.settings.pair ? [] : DIRECTIONS[this.settings.direction].source, this.settings.customVocabulary);
       if (this.stopping || this.disposed) return;
       this.ready = true;
-      await this.capture.start(chunk => this.audio(chunk));
+      this.lastTranscriptAt = Date.now();
+      await this.capture.start(chunk => this.audio(chunk), message => { if (!this.stopping) this.fail(message); });
       if (!this.stopping && !this.disposed) this.status('listening', this.settings.pair
-        ? '正在雙向聆聽。兩種語言可以輪流說，AI 會自動翻成另一種語言。'
+        ? '音訊已開始傳送，等待辨識文字。兩種語言可以輪流說。'
         : 'Gemini AI 正在聆聽。草稿會隨後續語音修正，短暫停頓會接在同一段。');
     } catch (error) {
       if (!this.stopping && !this.disposed) {
         const hint = error instanceof DOMException && error.name === 'NotAllowedError'
-          ? '無法使用麥克風。請確認網址為 HTTPS，並允許此網站使用麥克風。'
+          ? this.settings.audioSource === 'display' ? '未允許分享音訊；請按開始，選擇播放中的分頁並勾選分享音訊。'
+            : '無法使用麥克風。請確認網址為 HTTPS，並允許此網站使用麥克風。'
           : error instanceof DOMException && error.name === 'NotFoundError' ? '找不到麥克風，請確認裝置已連接。' : readableError(error);
         this.fail(hint);
       }
@@ -164,14 +172,29 @@ export class BrowserTranslationSession {
     try {
       if (this.stt.sendAudio(chunk)) {
         this.usage.addAudioBytes(chunk.byteLength);
+        const now = Date.now();
+        const level = pcmLevel(chunk);
+        if (now - this.lastLevelAt >= 200) {
+          this.lastLevelAt = now;
+          this.send({ type: 'audio-level', sessionId: this.id, level });
+        }
+        if (level >= 0.008) this.signalSeconds += chunk.byteLength / 32000;
+        if (!this.stopping && !this.warnedNoTranscript && this.signalSeconds >= 2 && now - this.lastTranscriptAt > 15000) {
+          this.warnedNoTranscript = true;
+          this.send({ type: 'warning', sessionId: this.id,
+            message: '已收到聲音，但辨識服務超過 15 秒沒有回傳文字。請確認音源是清楚的人聲；若持續無字幕，請停止後重試。' });
+        }
         if (Date.now() - this.lastUsage > 1000) this.sendUsage();
         this.budget();
-      }
+      } else this.fail('音訊未能傳送到辨識服務，已停止收音。請檢查連線後重新開始。');
     } catch (error) { this.fail(readableError(error)); }
   }
 
   private transcript(text: string, final: boolean, languageCode?: string) {
     if (this.disposed || !text.trim()) return;
+    this.lastTranscriptAt = Date.now(); this.signalSeconds = 0;
+    if (this.warnedNoTranscript && !this.stopping) this.status('listening', '已收到辨識文字，正在持續翻譯。');
+    this.warnedNoTranscript = false;
     const detected = languageFromCode(languageCode);
     if (this.settings.pair && isPairLanguage(detected, this.settings.pair)) this.speechAudioLanguage = detected;
     const audioLanguage = this.settings.pair ? this.speechAudioLanguage : undefined;

@@ -1,11 +1,12 @@
 import { Fragment, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { DIRECTIONS, LANGUAGE_PAIRS, type LanguagePair, type Mode, type ServerMessage } from '../shared/protocol';
+import { DIRECTIONS, LANGUAGE_PAIRS, type AudioSource, type LanguagePair, type Mode, type ServerMessage } from '../shared/protocol';
 import { BrowserTranslationSession } from './lib/session';
 import { exportParagraphs, groupCaptions, inlineText, joinSpeech } from './lib/paragraphs';
 import { loadApiKey, saveApiKey, loadVocabulary, saveVocabulary, parseVocabulary, loadExchangeRate, saveExchangeRate } from './lib/preferences';
 import type { Caption } from './lib/types';
 import { captionHistory } from './lib/history';
 import { INITIAL_USAGE_HISTORY, usageHistory } from './lib/usage-history';
+import { stopWhenHidden } from './lib/page-visibility';
 import { sourceLang, targetLang } from './lib/chinese';
 import { defaultDirection } from './lib/languages';
 import { EXCHANGE_RATE_DATE, EXCHANGE_RATE_SOURCE, formatTwd, twdBudgetToUsd, usdToTwd, validExchangeRate } from './lib/currency';
@@ -38,6 +39,8 @@ export default function App() {
   const [pair, setPair] = useState<LanguagePair>('zh-ja');
   const direction = defaultDirection(pair);
   const [mode, setMode] = useState<Mode>('saving');
+  const [audioSource, setAudioSource] = useState<AudioSource>('microphone');
+  const [audioLevel, setAudioLevel] = useState<number | null>(null);
   const [budget, setBudget] = useState('');
   const [exchangeRate, setExchangeRate] = useState(() => String(loadExchangeRate()));
   const [sessionExchangeRate, setSessionExchangeRate] = useState(() => loadExchangeRate());
@@ -56,7 +59,9 @@ export default function App() {
   const wakeLock = useRef<WakeLockSentinel | null>(null);
 
   const secure = window.isSecureContext && location.protocol !== 'file:';
-  const supported = Boolean(navigator.mediaDevices?.getUserMedia) && typeof AudioContext !== 'undefined' && 'audioWorklet' in AudioContext.prototype;
+  const displaySupported = Boolean(navigator.mediaDevices?.getDisplayMedia);
+  const supported = Boolean(audioSource === 'display' ? displaySupported : navigator.mediaDevices?.getUserMedia)
+    && typeof AudioContext !== 'undefined' && 'audioWorklet' in AudioContext.prototype;
   const running = ['connecting', 'ready', 'listening', 'finishing'].includes(status);
   const displayRate = running || !validExchangeRate(Number(exchangeRate)) ? sessionExchangeRate : Number(exchangeRate);
 
@@ -71,12 +76,16 @@ export default function App() {
     if (event.sessionId !== session.current?.id) return;
     if (event.type === 'status') {
       changeStatus(event.status);
+      if (event.status === 'listening' && !startedAt.current) startedAt.current = Date.now();
       setMessage(event.message ?? LABEL[event.status]);
       if (event.status === 'stopped') void wakeLock.current?.release().catch(() => {});
+      if (event.status === 'listening' && document.hidden && stopWhenHidden(navigator))
+        void session.current?.stop('手機頁面已切到背景，已停止收音；請返回此頁重新開始。');
     } else if (event.type === 'error') {
       changeStatus('error'); setMessage(event.message);
       void wakeLock.current?.release().catch(() => {});
     } else if (event.type === 'warning') setMessage(event.message);
+    else if (event.type === 'audio-level') setAudioLevel(event.level);
     else if (event.type === 'usage') dispatchUsage(event);
     else dispatchCaptions({ type: 'message', event, direction });
   }
@@ -90,11 +99,11 @@ export default function App() {
     catch (error) { setMessage(error instanceof Error ? error.message : '請檢查預算與匯率。'); return; }
     session.current?.dispose();
     changeStatus('connecting');
-    dispatchCaptions({ type: 'start-session' }); setElapsed(0);
+    dispatchCaptions({ type: 'start-session' }); setElapsed(0); setAudioLevel(null);
     setKeyExpanded(false);
     setSessionExchangeRate(rate);
-    startedAt.current = Date.now(); followBottom.current = true;
-    const next = new BrowserTranslationSession({ apiKey: apiKey.trim(), direction, pair, mode, budgetUsd: amount,
+    startedAt.current = 0; followBottom.current = true;
+    const next = new BrowserTranslationSession({ apiKey: apiKey.trim(), direction, pair, mode, audioSource, budgetUsd: amount,
       customVocabulary: parseVocabulary(vocabulary), context: captions.slice(-4)
         .map(item => `${DIRECTIONS[item.direction].sourceLabel}: ${item.original}`).join('\n').slice(-512) }, receive);
     session.current = next;
@@ -108,13 +117,13 @@ export default function App() {
 
   useEffect(() => {
     const tick = () => {
-      if (startedAt.current && ['connecting', 'listening', 'finishing'].includes(statusRef.current))
+      if (startedAt.current && ['listening', 'finishing'].includes(statusRef.current))
         setElapsed(Math.floor((Date.now() - startedAt.current) / 1000));
     };
     const interval = window.setInterval(tick, 1000);
     // 行動瀏覽器在背景可能暫停音訊，主動收尾而不是假裝仍持續辨識。
     const hidden = () => {
-      if (document.hidden && ['connecting', 'ready', 'listening'].includes(statusRef.current))
+      if (document.hidden && stopWhenHidden(navigator) && ['ready', 'listening'].includes(statusRef.current))
         void session.current?.stop('頁面已切到背景，正在停止收音；返回後可重新開始。');
     };
     const leave = () => {
@@ -147,7 +156,7 @@ export default function App() {
     session.current?.dispose(); session.current = null;
     dispatchCaptions({ type: 'clear-history' });
     dispatchUsage({ type: 'clear-history' });
-    startedAt.current = 0; setElapsed(0);
+    startedAt.current = 0; setElapsed(0); setAudioLevel(null);
     setMessage('已清除字幕紀錄與累計用量、費用。');
   }
 
@@ -188,6 +197,10 @@ export default function App() {
     </section>
 
     <section className="control-panel">
+      <label>音訊來源<select value={audioSource} disabled={running} onChange={event => setAudioSource(event.target.value as AudioSource)}>
+        <option value="microphone">麥克風（對話）</option>
+        <option value="display" disabled={!displaySupported}>分頁／電腦音訊{!displaySupported ? '（此瀏覽器不支援）' : ''}</option>
+      </select></label>
       <label>翻譯語言（雙向）<select value={pair} disabled={running} onChange={event => setPair(event.target.value as LanguagePair)}>
         {Object.entries(LANGUAGE_PAIRS).map(([value, item]) => <option value={value} key={value}>{item.label}</option>)}
       </select></label>
@@ -200,6 +213,7 @@ export default function App() {
         <button className="stop" disabled={!running || status === 'finishing'} onClick={() => void session.current?.stop()}>■ 停止</button>
       </div>
     </section>
+    {audioSource === 'display' && <p className="source-hint">按開始後選擇正在播放的分頁，勾選「分享分頁音訊」。分享視窗或整個螢幕時也必須包含音訊；只傳聲音，不傳畫面。</p>}
     <div className="settings-row"><details className="recognition-settings"><summary>辨識提示與常用詞（選填）</summary>
       <label htmlFor="vocabulary">常用詞：姓名、地名或專有名詞</label>
       <textarea id="vocabulary" value={vocabulary} disabled={running} maxLength={6000} rows={2}
@@ -214,14 +228,17 @@ export default function App() {
       }} />
       <p>此為可調整、會記住的參考匯率，不會自動更新。預設參考 <a href={EXCHANGE_RATE_SOURCE} target="_blank" rel="noreferrer">臺灣銀行 {EXCHANGE_RATE_DATE} 牌告</a>。實際台幣扣款依 Google 與付款方式的匯率為準。</p>
     </details></div>
-    <section className="session-bar" aria-live="polite"><div><strong>{LANGUAGE_PAIRS[pair].label}</strong><span>{message}</span></div><time>{time}</time></section>
+    <section className="session-bar"><div className="session-info" aria-live="polite"><strong>{LANGUAGE_PAIRS[pair].label}</strong><span>{message}</span></div>
+      {running && <span className="audio-signal"><meter min={0} max={1} value={Math.min(1, (audioLevel ?? 0) * 8)} aria-label="輸入音量" />
+        {audioLevel === null ? '等待音訊' : audioLevel >= 0.008 ? '收到聲音' : '音量低／安靜'}</span>}
+      <time>{time}</time></section>
     <section className="workspace">
       <div className="section-title"><h2>字幕紀錄</h2>
         <label className="switch"><input type="checkbox" checked={showOriginal} onChange={event => setShowOriginal(event.target.checked)} />顯示原文</label></div>
       <div className="captions" ref={captionPane} onScroll={event => {
         const pane = event.currentTarget; followBottom.current = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
       }}>
-        {!captions.length && <div className="empty"><span>聲</span><p>按開始，讓語言跟上你的對話</p><small>請保持頁面開啟；切到背景會自動停止。</small></div>}
+        {!captions.length && <div className="empty"><span>聲</span><p>按開始，讓語言跟上你的對話</p><small>電腦可切換分頁；手機請保持此頁在前景。</small></div>}
         {paragraphs.map((item, index) => <Fragment key={item.id}>
           {(index === 0 || paragraphs[index - 1].sessionId !== item.sessionId || paragraphs[index - 1].direction !== item.direction) && <div className="session-divider">
             <strong>{DIRECTIONS[item.direction].sourceLabel} → {DIRECTIONS[item.direction].targetLabel}</strong>
@@ -245,6 +262,6 @@ export default function App() {
       <div><span>累計估算費用（台幣）</span><strong>{formatTwd(usdToTwd(usage.estimatedUsd, displayRate))}</strong>
         <small>US$1 ≈ NT${displayRate.toLocaleString('zh-TW', {maximumFractionDigits:4})}</small></div>
     </section>
-    <footer>版本 2.3 · 重新整理會清除字幕及累計用量，請先下載。費用與預算停止皆為估算，實際以帳單為準。</footer>
+    <footer>版本 2.3.1 · 重新整理會清除字幕及累計用量，請先下載。費用與預算停止皆為估算，實際以帳單為準。</footer>
   </main>;
 }
