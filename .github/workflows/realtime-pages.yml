@@ -1,0 +1,49 @@
+name: Deploy realtime subtitles to GitHub Pages
+
+# 在 GitHub 的 Actions 頁面手動選 Run workflow 才會發佈。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install locked dependencies
+        working-directory: realtime-text
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify and build
+        working-directory: realtime-text
+        run: |
+          pnpm test
+          pnpm run build
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: realtime-text/dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,36 @@
+{
+  "name": "gemini-realtime-text-translator",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 3000",
+    "build": "tsc --noEmit -p tsconfig.json && vite build && node scripts/package-static.mjs",
+    "start": "node scripts/serve.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "dotenv": "16.6.1",
+    "express": "5.1.0",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "ws": "8.18.3"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.3",
+    "@types/node": "24.3.1",
+    "@types/react": "19.1.12",
+    "@types/react-dom": "19.1.9",
+    "@types/ws": "8.18.1",
+    "@vitejs/plugin-react": "5.0.2",
+    "concurrently": "9.2.1",
+    "tsx": "4.20.5",
+    "typescript": "5.9.2",
+    "vite": "7.1.5",
+    "vitest": "3.2.4"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

@@ -1,0 +1,61 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { GeminiBrowserSTT } from '../src/lib/stt';
+
+class Socket {
+  static OPEN = 1;
+  static CLOSING = 2;
+  static current: Socket;
+  readyState = 1;
+  bufferedAmount = 0;
+  sent: string[] = [];
+  onopen?: () => void;
+  onmessage?: (event: { data: string | Blob }) => void;
+  onerror?: () => void;
+  onclose?: (event: { code: number; reason: string }) => void;
+  constructor(public url: string) { Socket.current = this; }
+  send(value: string) { this.sent.push(value); }
+  close() { this.readyState = 3; this.onclose?.({ code: 1000, reason: '' }); }
+}
+const settle = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
+afterEach(() => vi.unstubAllGlobals());
+
+describe('瀏覽器直連語音協定', () => {
+  it('使用純文字設定、處理 Blob 與字串事件，送出 PCM 和尾端結束訊號', async () => {
+    vi.stubGlobal('WebSocket', Socket);
+    const onInterim = vi.fn(); const onFinal = vi.fn(); const onError = vi.fn();
+    const stt = new GeminiBrowserSTT({ onInterim, onFinal, onError });
+    const connected = stt.connect('test-key', 'ja-JP');
+    const socket = Socket.current;
+    socket.onopen?.();
+    const setup = JSON.parse(socket.sent[0]);
+    expect(setup.setup.generationConfig.responseModalities).toEqual(['TEXT']);
+    expect(setup.setup.inputAudioTranscription.languageCodes).toEqual(['ja-JP']);
+    expect(stt.sendAudio(new ArrayBuffer(2))).toBe(false);
+    socket.onmessage?.({ data: JSON.stringify({ setupComplete: {} }) }); await connected;
+    socket.onmessage?.({ data: new Blob([JSON.stringify({ serverContent: { interimInputTranscription: { text: 'こんにちは' } } })]) });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    socket.onmessage?.({ data: JSON.stringify({ serverContent: { inputTranscription: { text: 'こんにちは。' } } }) });
+    await settle();
+    expect(onInterim).toHaveBeenCalledWith('こんにちは'); expect(onFinal).toHaveBeenCalledWith('こんにちは。');
+    expect(stt.sendAudio(new ArrayBuffer(3200))).toBe(true); stt.endAudio();
+    expect(JSON.parse(socket.sent[1]).realtimeInput.audio.mimeType).toBe('audio/pcm;rate=16000');
+    expect(JSON.parse(socket.sent[2]).realtimeInput.audioStreamEnd).toBe(true);
+    stt.close(); expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('使用者在 setup 完成前取消，不會留下等待中的連線', async () => {
+    vi.stubGlobal('WebSocket', Socket);
+    const stt = new GeminiBrowserSTT({ onInterim: vi.fn(), onFinal: vi.fn(), onError: vi.fn() });
+    const connecting = stt.connect('test', 'ja-JP'); stt.close();
+    await expect(connecting).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('網路堆積超過上限會停止，不默默堆積音訊', async () => {
+    vi.stubGlobal('WebSocket', Socket);
+    const stt = new GeminiBrowserSTT({ onInterim: vi.fn(), onFinal: vi.fn(), onError: vi.fn() });
+    const connecting = stt.connect('test', 'ja-JP');
+    Socket.current.onmessage?.({ data: '{"setupComplete":{}}' }); await connecting;
+    Socket.current.bufferedAmount = 65000;
+    expect(() => stt.sendAudio(new ArrayBuffer(3200))).toThrow('壅塞'); stt.close();
+  });
+});
