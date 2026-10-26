@@ -1,6 +1,6 @@
 {
   "name": "gemini-realtime-text-translator",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
   "dependencies": {
     "dotenv": "16.6.1",
     "express": "5.1.0",
+    "opencc-js": "1.4.2",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "ws": "8.18.3"

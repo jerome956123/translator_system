@@ -16,6 +16,9 @@ for (const match of styles) {
   html = html.replace(match[0], () => `<style>${css}</style>`);
 }
 if (/src="[^" ]+\.js"|href="[^" ]+\.css"/.test(html)) throw new Error('單檔打包仍有外部程式資源。');
+const notices = await Promise.all(['LICENSE', 'THIRD_PARTY_LICENSES.md', 'LICENSES/Apache-2.0.txt']
+  .map(file => readFile(resolve(root, 'node_modules/opencc-js', file), 'utf8')));
+html = html.replace('</head>', `<!-- opencc-js and dictionary licenses\n${notices.join('\n').replace(/--/g, '- -')}\n-->\n</head>`);
 await writeFile(resolve(dist, 'standalone.html'), html);
 await writeFile(resolve(root, '..', 'index.html'), html);
 console.log('已產生純前端網站 dist/，以及可直接更新 GitHub Pages 首頁的 index.html。');

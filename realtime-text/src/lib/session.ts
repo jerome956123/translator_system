@@ -6,7 +6,8 @@ import { TranslationScheduler } from './scheduler';
 import { TranscriptAssembler } from './transcripts';
 import { streamTranslation } from './translator';
 import { UsageTracker } from './usage';
-import type { SessionSettings } from './types';
+import { sourceText, translatedText } from './chinese';
+import type { SessionSettings, TranslationTask, TranslationResult, ReviewCaption } from './types';
 
 interface Capture {
   prepare: () => Promise<void>;
@@ -34,6 +35,9 @@ export class BrowserTranslationSession {
   private lastUsage = 0;
   private finalArrived?: () => void;
   private finishTimer?: ReturnType<typeof setTimeout>;
+  private tasks = new Map<string, TranslationTask>();
+  private receivedAt = new Map<string, number>();
+  private edited = new Map<string, { original: string; translation: string }>();
 
   constructor(private settings: SessionSettings, private emit: (event: ServerMessage) => void, dependencies: Dependencies = {}) {
     this.capture = dependencies.capture ?? new AudioCapture();
@@ -46,6 +50,7 @@ export class BrowserTranslationSession {
     this.stt = dependencies.createSTT?.(callbacks) ?? new GeminiBrowserSTT(callbacks);
     this.scheduler = new TranslationScheduler({
       intervalMs: settings.mode === 'fast' ? 1000 : 1500,
+      prepareTask: task => this.prepareTranslation(task),
       translate: (task, requestId, onChunk, signal) => (dependencies.translate ?? streamTranslation)({
         ...task, apiKey: settings.apiKey, signal, onChunk,
         onUsage: (input, output, inputTokens, outputTokens) => {
@@ -53,12 +58,60 @@ export class BrowserTranslationSession {
           this.sendUsage(); this.budget();
         },
       }),
-      onTranslation: (task, requestId, text, complete) => this.send({
-        type: 'translation', sessionId: this.id, captionId: task.captionId, revision: task.revision,
-        requestId, text, final: task.final && complete,
-      }),
+      onTranslation: (task, requestId, text, complete) => {
+        const localized = translatedText(text, settings.direction);
+        this.edited.set(task.captionId, { original: this.edited.get(task.captionId)?.original ?? task.text, translation: localized });
+        this.send({ type: 'translation', sessionId: this.id, captionId: task.captionId, revision: task.revision,
+          requestId, text: localized, final: task.final && complete });
+      },
+      onResult: (task, _requestId, result) => this.applyResult(task, result),
       onError: message => { if (!this.disposed) this.fail(message); },
     });
+  }
+
+  private prepareTranslation(task: TranslationTask): TranslationTask {
+    const tasks = [...this.tasks.values()];
+    const index = tasks.findIndex(item => item.captionId === task.captionId);
+    const preceding = tasks.slice(0, Math.max(0, index));
+    const review: ReviewCaption[] = preceding.filter(item => item.final
+      && Date.now() - (this.receivedAt.get(item.captionId) ?? 0) <= 45000).slice(-2).map(item => ({
+      captionId: item.captionId, revision: item.revision, raw: item.text,
+      original: this.edited.get(item.captionId)?.original ?? item.text,
+      translation: this.edited.get(item.captionId)?.translation ?? '',
+    }));
+    return { ...task, review,
+      context: [this.settings.context ?? '', ...preceding.slice(-4)
+        .map(item => this.edited.get(item.captionId)?.original ?? item.text)].filter(Boolean).join('\n').slice(-512),
+      following: tasks.slice(index + 1, index + 3).map(item => item.text).join('\n').slice(0, 220),
+      vocabulary: this.settings.customVocabulary ?? [],
+    };
+  }
+
+  private applyResult(task: TranslationTask, result: TranslationResult) {
+    if (this.disposed) return;
+    const current = this.tasks.get(task.captionId);
+    // 相容前綴可以先顯示譯文，但不能用舊句的校對結果覆寫新原文。
+    if (!current || current.revision !== task.revision || current.text !== task.text) return;
+    if (result.original?.trim()) this.applyEdit(current, result.original, result.text);
+    for (const correction of result.corrections ?? []) {
+      const supplied = task.review?.find(item => item.captionId === correction.captionId && item.revision === correction.revision);
+      const target = this.tasks.get(correction.captionId);
+      if (!supplied || !target?.final || target.revision !== supplied.revision || target.text !== supplied.raw
+        || correction.confidence !== 'high' || !correction.evidence.trim()
+        || Date.now() - (this.receivedAt.get(target.captionId) ?? 0) > 45000) continue;
+      // 校正最近的同音詞；不讓舊待譯工作再把修正後的譯文蓋回去。
+      this.scheduler.remove([target.captionId]);
+      this.applyEdit(target, correction.original, correction.translation);
+    }
+  }
+
+  private applyEdit(task: TranslationTask, original: string, translation: string) {
+    if (!original.trim() || !translation.trim()) return;
+    const localized = { original: sourceText(original.trim(), this.settings.direction),
+      translation: translatedText(translation.trim(), this.settings.direction) };
+    this.edited.set(task.captionId, localized);
+    this.send({ type: 'caption-correction', sessionId: this.id, captionId: task.captionId,
+      revision: task.revision, ...localized, final: task.final, corrected: localized.original !== task.text });
   }
 
   private send(event: ServerMessage) { if (!this.disposed) this.emit(event); }
@@ -102,15 +155,23 @@ export class BrowserTranslationSession {
 
   private transcript(text: string, final: boolean) {
     if (this.disposed || !text.trim()) return;
-    const { changed, removed } = this.assembler.update(text, final);
+    const { changed, removed } = this.assembler.update(sourceText(text, this.settings.direction), final);
     if (removed.length) {
       this.scheduler.remove(removed);
+      for (const id of removed) { this.tasks.delete(id); this.edited.delete(id); this.receivedAt.delete(id); }
       this.send({ type: 'remove-captions', sessionId: this.id, captionIds: removed });
     }
     for (const task of changed) {
+      this.tasks.set(task.captionId, task);
+      this.receivedAt.set(task.captionId, Date.now());
+      this.edited.delete(task.captionId);
       this.send({ type: 'transcript', sessionId: this.id, captionId: task.captionId, revision: task.revision,
         paragraphId: task.paragraphId, text: task.text, final: task.final, receivedAt: Date.now() });
       this.scheduler.enqueue(task);
+    }
+    while (this.tasks.size > 64) {
+      const oldest = this.tasks.keys().next().value!;
+      this.tasks.delete(oldest); this.edited.delete(oldest); this.receivedAt.delete(oldest);
     }
   }
 
@@ -148,7 +209,7 @@ export class BrowserTranslationSession {
     this.finalArrived = undefined;
     this.ready = false;
     this.stt.close();
-    const finished = await this.scheduler.flush(4500);
+    const finished = await this.scheduler.flush(8000);
     if (this.disposed) return;
     this.sendUsage();
     this.status('stopped', finished ? '已停止，字幕可以複製或下載。' : '已停止；尚未完成的內容保留為草稿。');

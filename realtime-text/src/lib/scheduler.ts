@@ -6,12 +6,14 @@ interface Options {
   translate: (task: TranslationTask, requestId: string, onChunk: (text: string) => void, signal: AbortSignal) => Promise<TranslationResult>;
   onTranslation: (task: TranslationTask, requestId: string, text: string, complete: boolean) => void;
   onError: (message: string) => void;
+  prepareTask?: (task: TranslationTask) => TranslationTask;
+  onResult?: (task: TranslationTask, requestId: string, result: TranslationResult) => void;
 }
 
 export class TranslationScheduler {
   private pending = new Map<string, TranslationTask>();
   private latest = new Map<string, TranslationTask>();
-  private cache = new Map<string, string>();
+  private cache = new Map<string, TranslationResult>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private controller: AbortController | undefined;
   private running = false;
@@ -40,7 +42,9 @@ export class TranslationScheduler {
     for (const id of ids) { this.latest.delete(id); this.pending.delete(id); }
   }
 
-  private signature(task: TranslationTask) { return `${task.direction}\0${task.context}\0${task.text}`; }
+  private signature(task: TranslationTask) { return JSON.stringify([
+    task.direction, task.context, task.text, task.review, task.following, task.vocabulary,
+  ]); }
 
   private current(task: TranslationTask) {
     const latest = this.latest.get(task.captionId);
@@ -63,15 +67,19 @@ export class TranslationScheduler {
   private async next() {
     if (this.closed || this.running) return;
     const tasks = [...this.pending.values()];
-    const task = tasks.find(value => value.final) ?? tasks[0];
-    if (!task) { this.resolve(true); return; }
+    const pending = tasks.find(value => value.final) ?? tasks[0];
+    if (!pending) { this.resolve(true); return; }
+    const task = this.options.prepareTask?.(pending) ?? pending;
     this.pending.delete(task.captionId);
     this.running = true;
     const requestId = `${task.sessionId}-${++this.sequence}`;
     const signature = this.signature(task);
     try {
       const cached = this.cache.get(signature);
-      if (cached !== undefined) this.emit(task, requestId, cached, true);
+      if (cached !== undefined) {
+        this.emit(task, requestId, cached.text, true);
+        if (this.current(task)) this.options.onResult?.(task, requestId, cached);
+      }
       else {
         this.lastStarted = Date.now();
         this.controller = new AbortController();
@@ -80,9 +88,10 @@ export class TranslationScheduler {
         try {
           const result = await this.options.translate(task, requestId, text => this.emit(task, requestId, text, false), this.controller.signal);
           if (!this.closed) {
-            this.cache.set(signature, result.text);
+            this.cache.set(signature, result);
             if (this.cache.size > 128) this.cache.delete(this.cache.keys().next().value!);
             this.emit(task, requestId, result.text, true);
+            if (this.current(task)) this.options.onResult?.(task, requestId, result);
           }
         } finally { clearTimeout(timeout); }
       }

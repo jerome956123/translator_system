@@ -3,7 +3,8 @@ import { exportParagraphs, groupCaptions, joinSpeech } from '../src/lib/paragrap
 import type { Caption } from '../src/lib/types';
 
 const caption = (id: string, paragraphId: string, original: string, translation: string, final = true): Caption => ({
-  id, paragraphId, original, translation, originalFinal: final, translationFinal: final, revision: 1, translationRevision: 1,
+  id, paragraphId, original, translation, sessionId: 's1', direction: 'zh-en', receivedAt: 1000,
+  originalFinal: final, translationFinal: final, revision: 1, translationRevision: 1,
 });
 
 describe('連續段落顯示與匯出', () => {
@@ -17,7 +18,7 @@ describe('連續段落顯示與匯出', () => {
     expect(paragraphs[0].original).toBe('今天有一場會議。我們會討論');
     expect(paragraphs[0].translation).toBe('There is a meeting today. We will discuss');
     expect(paragraphs[0].translationFinal).toBe(false);
-    expect(exportParagraphs(paragraphs, true)).toBe('[原文草稿] 今天有一場會議。我們會討論\n[譯文（草稿）] There is a meeting today. We will discuss\n\n[原文] 接著休息。\n[譯文] Then take a break.');
+    expect(exportParagraphs(paragraphs, true)).toBe('【繁體中文 → English】\n[原文草稿] 今天有一場會議。我們會討論\n[譯文（草稿）] There is a meeting today. We will discuss\n\n[原文] 接著休息。\n[譯文] Then take a break.');
     expect(exportParagraphs(paragraphs, false)).not.toContain('原文');
   });
   it('合併中文／日文不亂加空格，英文保留單字和標點，模型多餘換行不造成空段', () => {

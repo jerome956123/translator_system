@@ -1,5 +1,5 @@
 :root {
-  font-family: Inter, "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+  font-family: "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", system-ui, sans-serif;
   color: #e7eef8;
   background: #08111f;
   font-synthesis: none;
@@ -11,13 +11,22 @@ button, select, input, textarea { font: inherit; }
 button { touch-action: manipulation; min-height: 44px; }
 input, select, textarea { min-width: 0; font-size: 16px; }
 a { color: #66dfca; }
-.key-panel { padding: 18px; margin-bottom: 16px; border: 1px solid #29435b; border-radius: 18px; background: #101e31; }
+.key-panel { padding: 6px 12px; margin-bottom: 12px; border: 1px solid #29435b; border-radius: 12px; background: #101e31; }
+.key-summary { display: flex; align-items: center; gap: 12px; font-size: 13px; min-height: 44px; }
+.key-summary strong { color: #b7c9df; }
+.key-summary span { color: #66dfca; font-size: 12px; }
+.key-summary button { margin-left: auto; padding: 5px 12px; font-size: 12px; background: transparent; }
+.key-editor { padding: 0 0 10px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .key-row { display: flex; gap: 8px; margin-top: 8px; }
 .key-row input { flex: 1; width: 0; }
 .key-panel p { font-size: 12px; color: #98aac0; line-height: 1.7; margin-bottom: 0; }
 .key-panel a { display: inline-block; margin-left: 8px; }
-.recognition-settings { margin-top: 12px; color: #98aac0; font-size: 13px; }
-.recognition-settings summary { cursor: pointer; min-height: 36px; padding-top: 8px; }
+.recognition-settings { margin-top: 8px; padding: 0 6px; color: #98aac0; font-size: 12px; }
+.recognition-settings summary { cursor: pointer; min-height: 36px; padding: 8px 0; }
+.recognition-settings[open] { padding: 0 14px 10px; border: 1px solid #29435b; border-radius: 12px; }
+.recognition-settings label { margin: 4px 0 6px; }
+.recognition-settings p { line-height: 1.6; }
 .recognition-settings textarea { resize: vertical; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .42; }
@@ -60,11 +69,14 @@ button.stop { color: #ffbbc2; background: #31141c; border-color: #63303b; }
 .empty span { display: grid; place-items: center; width: 58px; height: 58px; border: 1px solid #2c4059; border-radius: 50%; color: #54dbc5; font-size: 22px; }
 .caption { margin: 0 0 14px; padding: 16px 18px; border-radius: 14px; background: #111f32; border-left: 3px solid #50d7c1; }
 .live-fragment { opacity: .65; }
+.session-divider { display: flex; justify-content: space-between; align-items: center; color: #8ca7c6; font-size: 12px; padding: 2px 2px 10px; }
+.session-divider:not(:first-child) { margin-top: 22px; border-top: 1px solid #293d56; padding-top: 14px; }
 .caption p { margin: 0; line-height: 1.8; overflow-wrap: break-word; word-break: normal; white-space: normal; }
 .caption p + p { margin-top: 10px; padding-top: 10px; border-top: 1px solid #24354b; }
 .caption small { display: block; color: #6f87a2; font-size: 10px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
 .original { color: #a9bbcf; }
 .translation { color: #f5f8fb; font-size: 19px; }
+.caption [lang="ja"] { font-family: "Yu Gothic", "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; }
 .export-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px; border-top: 1px solid #1e2d42; }
 .usage-grid { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 16px; border-radius: 16px; overflow: hidden; }
 .usage-grid div { padding: 15px 18px; border-right: 1px solid #223249; }
@@ -80,7 +92,7 @@ footer { color: #60748c; text-align: center; font-size: 11px; line-height: 1.7; 
   .usage-grid div:nth-child(-n+2) { border-bottom: 1px solid #223249; }
 }
 @media (max-width: 600px) {
-  .session-active .key-panel, .session-active .control-panel > label { display: none; }
+  .session-active .key-panel, .session-active .recognition-settings, .session-active .control-panel > label { display: none; }
   .session-active .control-panel { position: sticky; top: 6px; z-index: 2; padding: 10px; }
   .session-active .hero { display: flex; align-items: center; margin-bottom: 12px; }
   .session-active .hero h1 { font-size: 26px; }
@@ -101,4 +113,5 @@ footer { color: #60748c; text-align: center; font-size: 11px; line-height: 1.7; 
   .session-bar time { padding-left: 8px; }
   .usage-grid { grid-template-columns: 1fr 1fr; }
   .usage-grid strong { font-size: 14px; }
+  .export-actions { flex-wrap: wrap; padding: 12px; }
 }

@@ -1,4 +1,5 @@
 import type { Caption } from './types';
+import { DIRECTIONS } from '../../shared/protocol';
 
 export interface CaptionParagraph {
   id: string;
@@ -7,6 +8,10 @@ export interface CaptionParagraph {
   translation: string;
   originalFinal: boolean;
   translationFinal: boolean;
+  sessionId: string;
+  direction: Caption['direction'];
+  receivedAt: number;
+  corrected: boolean;
 }
 
 export function inlineText(value: string): string { return value.replace(/\s+/gu, ' ').trim(); }
@@ -25,7 +30,8 @@ export function groupCaptions(captions: Caption[]): CaptionParagraph[] {
   for (const caption of captions) {
     let paragraph = paragraphs.at(-1);
     if (paragraph?.id !== caption.paragraphId) {
-      paragraph = { id: caption.paragraphId, captions: [], original: '', translation: '', originalFinal: true, translationFinal: true };
+      paragraph = { id: caption.paragraphId, captions: [], original: '', translation: '', originalFinal: true, translationFinal: true,
+        sessionId: caption.sessionId, direction: caption.direction, receivedAt: caption.receivedAt, corrected: false };
       paragraphs.push(paragraph);
     }
     paragraph.captions.push(caption);
@@ -33,12 +39,15 @@ export function groupCaptions(captions: Caption[]): CaptionParagraph[] {
     paragraph.translation = joinSpeech(paragraph.translation, caption.translation);
     paragraph.originalFinal &&= caption.originalFinal;
     paragraph.translationFinal &&= caption.translationFinal;
+    paragraph.corrected ||= Boolean(caption.corrected);
   }
   return paragraphs;
 }
 
 export function exportParagraphs(paragraphs: CaptionParagraph[], showOriginal: boolean): string {
-  return paragraphs.map(item => [
+  return paragraphs.map((item, index) => [
+    index === 0 || paragraphs[index - 1].sessionId !== item.sessionId
+      ? `【${DIRECTIONS[item.direction].sourceLabel} → ${DIRECTIONS[item.direction].targetLabel}】` : '',
     showOriginal ? `[原文${item.originalFinal ? '' : '草稿'}] ${item.original}` : '',
     item.translation ? `[譯文${item.translationFinal ? '' : '（草稿）'}] ${item.translation}` : '',
   ].filter(Boolean).join('\n')).filter(Boolean).join('\n\n');

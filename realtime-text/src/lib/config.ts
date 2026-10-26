@@ -6,7 +6,7 @@ export const MODELS = {
 // 2026-10-26 查閱官方價格；顯示的是估算，不包含稅與供應商額外的上下文計費。
 export const PRICES = { sttPerMinute: 0.009, textInputPerMillion: 0.25, textOutputPerMillion: 1.5 };
 export const CONTEXT_MAX_CHARS = 512;
-export const MAX_OUTPUT_TOKENS = 256;
+export const MAX_OUTPUT_TOKENS = 1024;
 
 export function readableError(error: unknown) {
   if (error instanceof Error && error.name === 'AbortError') return '本次請求已停止。';
