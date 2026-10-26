@@ -17,5 +17,5 @@ for (const match of styles) {
 }
 if (/src="[^" ]+\.js"|href="[^" ]+\.css"/.test(html)) throw new Error('單檔打包仍有外部程式資源。');
 await writeFile(resolve(dist, 'standalone.html'), html);
-await writeFile(resolve(root, '..', 'realtime.html'), html);
-console.log('已產生純前端網站 dist/，以及可單獨上傳的 realtime.html。');
+await writeFile(resolve(root, '..', 'index.html'), html);
+console.log('已產生純前端網站 dist/，以及可直接更新 GitHub Pages 首頁的 index.html。');

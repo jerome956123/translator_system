@@ -74,11 +74,11 @@ export class BrowserTranslationSession {
       // 先解鎖音訊處理，再等待網路；符合手機瀏覽器的使用者手勢要求。
       await this.capture.prepare();
       if (this.stopping || this.disposed) return;
-      await this.stt.connect(this.settings.apiKey, DIRECTIONS[this.settings.direction].source);
+      await this.stt.connect(this.settings.apiKey, DIRECTIONS[this.settings.direction].source, this.settings.customVocabulary);
       if (this.stopping || this.disposed) return;
       this.ready = true;
       await this.capture.start(chunk => this.audio(chunk));
-      if (!this.stopping && !this.disposed) this.status('listening', '正在聆聽。請保持此頁開啟，譯文會持續更新。');
+      if (!this.stopping && !this.disposed) this.status('listening', 'Gemini AI 正在聆聽。草稿會隨後續語音修正，短暫停頓會接在同一段。');
     } catch (error) {
       if (!this.stopping && !this.disposed) {
         const hint = error instanceof DOMException && error.name === 'NotAllowedError'
@@ -109,7 +109,7 @@ export class BrowserTranslationSession {
     }
     for (const task of changed) {
       this.send({ type: 'transcript', sessionId: this.id, captionId: task.captionId, revision: task.revision,
-        text: task.text, final: task.final, receivedAt: Date.now() });
+        paragraphId: task.paragraphId, text: task.text, final: task.final, receivedAt: Date.now() });
       this.scheduler.enqueue(task);
     }
   }

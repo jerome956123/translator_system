@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { DIRECTIONS, type Direction, type Mode, type ServerMessage, type UsageSnapshot } from '../shared/protocol';
 import { MODELS } from './lib/config';
 import { BrowserTranslationSession } from './lib/session';
+import { exportParagraphs, groupCaptions, inlineText, joinSpeech } from './lib/paragraphs';
+import { loadApiKey, saveApiKey, loadVocabulary, saveVocabulary, parseVocabulary } from './lib/preferences';
 import type { Caption } from './lib/types';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped' | 'error';
@@ -11,15 +13,31 @@ const LABEL: Record<Status, string> = {
   finishing: '處理最後一句', stopped: '已停止', error: '需要處理',
 };
 
+function FlowingCaption({ captions, field }: { captions: Caption[]; field: 'original' | 'translation' }) {
+  let previous = '';
+  return captions.map(caption => {
+    const text = inlineText(caption[field]);
+    if (!text) return null;
+    const joined = joinSpeech(previous, text);
+    const addition = joined.slice(previous.length);
+    previous = joined;
+    const final = field === 'original' ? caption.originalFinal : caption.translationFinal;
+    return <span className={final ? '' : 'live-fragment'} key={caption.id}>{addition}</span>;
+  });
+}
+
 export default function App() {
-  const [apiKey, setApiKey] = useState('');
+  const [apiKey, setApiKey] = useState(() => loadApiKey());
+  const [storageAvailable, setStorageAvailable] = useState(true);
   const [showKey, setShowKey] = useState(false);
+  const [vocabulary, setVocabulary] = useState(() => loadVocabulary());
   const [direction, setDirection] = useState<Direction>('zh-ja');
   const [mode, setMode] = useState<Mode>('saving');
   const [budget, setBudget] = useState('');
   const [showOriginal, setShowOriginal] = useState(true);
   const [status, setStatus] = useState<Status>('idle');
-  const [message, setMessage] = useState('填入自己的 API Key，按開始即可持續聆聽。');
+  const [message, setMessage] = useState(() => apiKey.trim()
+    ? '已帶入記住的 API Key，按開始即可持續聆聽。' : '填入自己的 API Key，按開始即可持續聆聽。');
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [usage, setUsage] = useState(EMPTY_USAGE);
   const [elapsed, setElapsed] = useState(0);
@@ -35,6 +53,11 @@ export default function App() {
   const running = ['connecting', 'ready', 'listening', 'finishing'].includes(status);
 
   function changeStatus(value: Status) { statusRef.current = value; setStatus(value); }
+
+  function updateApiKey(value: string) {
+    setApiKey(value);
+    setStorageAvailable(saveApiKey(value));
+  }
 
   function receive(event: ServerMessage) {
     if (event.sessionId !== session.current?.id) return;
@@ -52,7 +75,8 @@ export default function App() {
       setCaptions(items => {
         const existing = items.find(item => item.id === event.captionId);
         if (!existing) return [...items, {
-          id: event.captionId, revision: event.revision, original: event.text, translation: '', translationRevision: 0,
+          id: event.captionId, paragraphId: event.paragraphId ?? event.captionId,
+          revision: event.revision, original: event.text, translation: '', translationRevision: 0,
           originalFinal: event.final, translationFinal: false,
         }];
         if (existing.revision > event.revision) return items;
@@ -77,9 +101,9 @@ export default function App() {
     changeStatus('connecting');
     setCaptions([]); setUsage(EMPTY_USAGE); setElapsed(0);
     startedAt.current = Date.now(); followBottom.current = true;
-    const next = new BrowserTranslationSession({ apiKey: apiKey.trim(), direction, mode, budgetUsd: amount }, receive);
+    const next = new BrowserTranslationSession({ apiKey: apiKey.trim(), direction, mode, budgetUsd: amount,
+      customVocabulary: parseVocabulary(vocabulary) }, receive);
     session.current = next;
-    // 不把 Key 寫入 localStorage、sessionStorage、網頁網址列或部署產物。
     if (navigator.wakeLock) void navigator.wakeLock.request('screen').then(lock => {
       if (session.current !== next || !['connecting', 'ready', 'listening'].includes(statusRef.current)) void lock.release();
       else wakeLock.current = lock;
@@ -120,11 +144,8 @@ export default function App() {
     if (pane && followBottom.current) pane.scrollTop = pane.scrollHeight;
   }, [captions]);
 
-  const textOutput = useMemo(() => captions.map(item => {
-    const label = item.originalFinal && item.translationFinal ? '' : '（草稿）';
-    return [showOriginal ? `[原文${item.originalFinal ? '' : '草稿'}] ${item.original}` : '',
-      item.translation ? `[譯文${label}] ${item.translation}` : ''].filter(Boolean).join('\n');
-  }).filter(Boolean).join('\n\n'), [captions, showOriginal]);
+  const paragraphs = useMemo(() => groupCaptions(captions), [captions]);
+  const textOutput = useMemo(() => exportParagraphs(paragraphs, showOriginal), [paragraphs, showOriginal]);
 
   function download() {
     const url = URL.createObjectURL(new Blob(['\uFEFF', textOutput], { type: 'text/plain;charset=utf-8' }));
@@ -137,7 +158,7 @@ export default function App() {
   const time = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`;
   return <main className={`page-shell ${running ? 'session-active' : ''}`}>
     <header className="hero">
-      <div><p className="eyebrow">LIVE TEXT INTERPRETER</p><h1>即時翻譯字幕</h1><p>邊聽、邊看翻譯。手機與電腦都能使用。</p></div>
+      <div><p className="eyebrow">LIVE TEXT INTERPRETER</p><h1>即時翻譯字幕</h1><p>Gemini AI 聽寫，再即時翻譯。手機與電腦都能使用。</p></div>
       <span className={`status status-${status}`}><i />{LABEL[status]}</span>
     </header>
 
@@ -147,12 +168,21 @@ export default function App() {
     <section className="key-panel">
       <label htmlFor="api-key">你的 Gemini API Key</label>
       <div className="key-row"><input id="api-key" type={showKey ? 'text' : 'password'} value={apiKey} disabled={running}
-        autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="貼上自己的 API Key" onChange={event => setApiKey(event.target.value)} />
+        autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="貼上一次，下次自動帶入" onChange={event => updateApiKey(event.target.value)} />
         <button type="button" onClick={() => setShowKey(value => !value)} aria-label={showKey ? '隱藏金鑰' : '顯示金鑰'}>{showKey ? '隱藏' : '顯示'}</button>
-        <button type="button" disabled={running || !apiKey} onClick={() => { setApiKey(''); session.current?.dispose(); session.current = null; }}>清除</button>
+        <button type="button" disabled={running || !apiKey} title="刪除此瀏覽器記住的 API Key"
+          onClick={() => { updateApiKey(''); session.current?.dispose(); session.current = null; }}>清除</button>
       </div>
-      <p>金鑰只留在本次頁面，重新整理後需再輸入。音訊與文字會直接送往 Google Gemini。
+      <p role="status">{!storageAvailable ? '瀏覽器暫時無法更新儲存的金鑰。重新開啟後請確認輸入內容，本次仍可使用。'
+        : apiKey.trim() ? '已在此瀏覽器記住金鑰，下次開啟會自動帶入。按「清除」即可刪除。'
+        : '貼上後自動記住，只存在此裝置的這個瀏覽器。'} 音訊與文字直接送往 Google Gemini。
         <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">取得 API Key ↗</a></p>
+      <details className="recognition-settings"><summary>辨識提示（選填）</summary>
+        <label htmlFor="vocabulary">常用詞：姓名、地名或專有名詞<textarea id="vocabulary" value={vocabulary} disabled={running}
+          maxLength={6000} rows={2} placeholder="例如：國立中央大學、雙聯學位、你的姓名"
+          onChange={event => { setVocabulary(event.target.value); saveVocabulary(event.target.value); }} /></label>
+        <p>用逗號或換行分隔，最多採用 100 個詞，每詞 200 字內。提供詞彙可幫助 AI 辨識，但不保證每次正確。</p>
+      </details>
     </section>
 
     <section className="control-panel">
@@ -170,15 +200,17 @@ export default function App() {
     </section>
     <section className="session-bar" aria-live="polite"><div><strong>{DIRECTIONS[direction].sourceLabel} → {DIRECTIONS[direction].targetLabel}</strong><span>{message}</span></div><time>{time}</time></section>
     <section className="workspace">
-      <div className="section-title"><div><h2>字幕</h2><p>譯文持續補上，草稿會隨後續內容修正。</p></div>
+      <div className="section-title"><div><h2>字幕</h2><p>短停頓接在同一段；較淡文字仍在修正中。</p></div>
         <label className="switch"><input type="checkbox" checked={showOriginal} onChange={event => setShowOriginal(event.target.checked)} />顯示原文</label></div>
       <div className="captions" ref={captionPane} onScroll={event => {
         const pane = event.currentTarget; followBottom.current = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
       }}>
         {!captions.length && <div className="empty"><span>聲</span><p>按開始，讓語言跟上你的對話</p><small>請保持頁面開啟；切到背景會自動停止。</small></div>}
-        {captions.map(item => <article className={item.originalFinal ? 'caption' : 'caption draft'} key={item.id}>
-          {showOriginal && <p className="original"><small>{item.originalFinal ? '原文' : '原文草稿'}</small>{item.original}</p>}
-          <p className="translation"><small>{item.translationFinal ? '譯文' : running ? '譯文草稿' : '未完成草稿'}</small>{item.translation || '等待翻譯…'}</p>
+        {paragraphs.map(item => <article className="caption" key={item.id}>
+          {showOriginal && <p className="original"><small>{item.originalFinal ? 'AI 原文' : 'AI 原文 · 草稿'}
+            </small><FlowingCaption captions={item.captions} field="original" /></p>}
+          <p className="translation"><small>{item.translationFinal ? '譯文' : running ? '譯文 · 更新中' : '譯文 · 含未完成草稿'}</small>
+            {item.translation ? <FlowingCaption captions={item.captions} field="translation" /> : '等待翻譯…'}</p>
         </article>)}
       </div>
       <div className="export-actions"><button disabled={!textOutput} onClick={() => void navigator.clipboard.writeText(textOutput)
@@ -191,6 +223,6 @@ export default function App() {
       <div><span>文字 Tokens{usage.tokenEstimate ? '（估算）' : ''}</span><strong>{usage.inputTokens ?? '未知'} / {usage.outputTokens ?? '未知'}</strong></div>
       <div><span>估算費用</span><strong>US${usage.estimatedUsd.toFixed(4)}</strong></div>
     </section>
-    <footer>本頁不生成語音。費用與預算停止都是估算，實際帳單以 Google 為準。<br />{MODELS.stt} ＋ {MODELS.translation}</footer>
+    <footer>版本 2.1 · 本頁不生成語音。費用與預算停止都是估算，實際帳單以 Google 為準。<br />{MODELS.stt} ＋ {MODELS.translation}</footer>
   </main>;
 }

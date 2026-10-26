@@ -46,6 +46,21 @@ describe('純前端場次生命週期', () => {
     expect(h.stt.connect).not.toHaveBeenCalled();
   });
 
+  it('短停頓未完句接續修正同一字幕，翻譯沿用完整句與相同段落 ID', async () => {
+    vi.useFakeTimers();
+    const h = harness(); await h.session.start();
+    h.callbacks.onFinal('我今天想要'); await vi.advanceTimersByTimeAsync(10);
+    h.callbacks.onInterim('買十五個');
+    h.callbacks.onFinal('買五十個。'); await vi.advanceTimersByTimeAsync(1600);
+    const transcripts = h.events.filter(event => event.type === 'transcript');
+    expect(new Set(transcripts.map(event => event.captionId)).size).toBe(1);
+    expect(new Set(transcripts.map(event => event.paragraphId)).size).toBe(1);
+    expect(transcripts.at(-1)?.text).toBe('我今天想要買五十個。');
+    expect(h.translate.mock.calls.at(-1)?.[0].text).toBe('我今天想要買五十個。');
+    expect(h.translate.mock.calls.length).toBeLessThanOrEqual(2);
+    h.session.dispose();
+  });
+
   it('達預算後中斷串流，沒有新音訊與翻譯', async () => {
     vi.useFakeTimers(); const h = harness(0.000001); await h.session.start();
     h.audio(new ArrayBuffer(3200));

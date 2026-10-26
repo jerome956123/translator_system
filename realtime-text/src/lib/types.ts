@@ -10,6 +10,7 @@ export interface TranslationTask {
   sessionId: string;
   utteranceId: string;
   captionId: string;
+  paragraphId?: string;
   revision: number;
   text: string;
   context: string;
@@ -22,10 +23,12 @@ export interface SessionSettings {
   direction: Direction;
   mode: Mode;
   budgetUsd?: number;
+  customVocabulary?: string[];
 }
 
 export interface Caption {
   id: string;
+  paragraphId: string;
   revision: number;
   original: string;
   translation: string;

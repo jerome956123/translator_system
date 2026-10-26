@@ -7,7 +7,7 @@ interface Callbacks {
 }
 
 export interface STTConnection {
-  connect: (apiKey: string, language: string) => Promise<void>;
+  connect: (apiKey: string, language: string, customVocabulary?: string[]) => Promise<void>;
   sendAudio: (pcm: ArrayBuffer) => boolean;
   endAudio: () => void;
   close: () => void;
@@ -21,7 +21,7 @@ export class GeminiBrowserSTT implements STTConnection {
 
   constructor(private callbacks: Callbacks) {}
 
-  connect(apiKey: string, language: string) {
+  connect(apiKey: string, language: string, customVocabulary: string[] = []) {
     return new Promise<void>((resolve, reject) => {
       this.rejectConnect = reject;
       const socket = new WebSocket(`wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`);
@@ -35,7 +35,14 @@ export class GeminiBrowserSTT implements STTConnection {
         if (this.expectedClose) return;
         socket.send(JSON.stringify({ setup: {
           model: `models/${MODELS.stt}`, generationConfig: { responseModalities: ['TEXT'] },
-          inputAudioTranscription: { languageCodes: [language] },
+          inputAudioTranscription: {
+            languageCodes: [language], mode: 'SMART',
+            ...(customVocabulary.length ? { customVocabulary } : {}),
+          },
+          // 保留短停頓中的同一句；草稿仍持續輸出，不必等到停頓結束。
+          realtimeInputConfig: { automaticActivityDetection: {
+            disabled: false, prefixPaddingMs: 100, silenceDurationMs: 800,
+          } },
         } }));
       };
       socket.onmessage = event => {

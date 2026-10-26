@@ -24,7 +24,7 @@ export interface UsageSnapshot {
 
 export type ServerMessage =
   | { type: 'status'; sessionId: string; status: 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped'; message?: string }
-  | { type: 'transcript'; sessionId: string; captionId: string; revision: number; text: string; final: boolean; receivedAt: number }
+  | { type: 'transcript'; sessionId: string; captionId: string; paragraphId?: string; revision: number; text: string; final: boolean; receivedAt: number }
   | { type: 'translation'; sessionId: string; captionId: string; revision: number; requestId: string; text: string; final: boolean; firstTokenAt?: number }
   | { type: 'usage'; sessionId: string; usage: UsageSnapshot }
   | { type: 'remove-captions'; sessionId: string; captionIds: string[] }

@@ -24,12 +24,18 @@ describe('瀏覽器直連語音協定', () => {
     vi.stubGlobal('WebSocket', Socket);
     const onInterim = vi.fn(); const onFinal = vi.fn(); const onError = vi.fn();
     const stt = new GeminiBrowserSTT({ onInterim, onFinal, onError });
-    const connected = stt.connect('test-key', 'ja-JP');
+    const connected = stt.connect('test-key', 'ja-JP', ['中央大学', '双聯学位']);
     const socket = Socket.current;
     socket.onopen?.();
     const setup = JSON.parse(socket.sent[0]);
     expect(setup.setup.generationConfig.responseModalities).toEqual(['TEXT']);
     expect(setup.setup.inputAudioTranscription.languageCodes).toEqual(['ja-JP']);
+    expect(setup.setup.model).toBe('models/gemini-3.5-transcribe-live');
+    expect(setup.setup.inputAudioTranscription.mode).toBe('SMART');
+    expect(setup.setup.inputAudioTranscription.customVocabulary).toEqual(['中央大学', '双聯学位']);
+    expect(setup.setup.realtimeInputConfig.automaticActivityDetection).toEqual({
+      disabled: false, prefixPaddingMs: 100, silenceDurationMs: 800,
+    });
     expect(stt.sendAudio(new ArrayBuffer(2))).toBe(false);
     socket.onmessage?.({ data: JSON.stringify({ setupComplete: {} }) }); await connected;
     socket.onmessage?.({ data: new Blob([JSON.stringify({ serverContent: { interimInputTranscription: { text: 'こんにちは' } } })]) });
