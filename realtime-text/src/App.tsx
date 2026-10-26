@@ -1,12 +1,14 @@
 import { Fragment, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { DIRECTIONS, type Direction, type Mode, type ServerMessage, type UsageSnapshot } from '../shared/protocol';
+import { DIRECTIONS, LANGUAGE_PAIRS, type LanguagePair, type Mode, type ServerMessage, type UsageSnapshot } from '../shared/protocol';
 import { MODELS } from './lib/config';
 import { BrowserTranslationSession } from './lib/session';
 import { exportParagraphs, groupCaptions, inlineText, joinSpeech } from './lib/paragraphs';
-import { loadApiKey, saveApiKey, loadVocabulary, saveVocabulary, parseVocabulary } from './lib/preferences';
+import { loadApiKey, saveApiKey, loadVocabulary, saveVocabulary, parseVocabulary, loadExchangeRate, saveExchangeRate } from './lib/preferences';
 import type { Caption } from './lib/types';
 import { captionHistory } from './lib/history';
 import { sourceLang, targetLang } from './lib/chinese';
+import { defaultDirection } from './lib/languages';
+import { EXCHANGE_RATE_DATE, EXCHANGE_RATE_SOURCE, formatTwd, twdBudgetToUsd, usdToTwd, validExchangeRate } from './lib/currency';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped' | 'error';
 const EMPTY_USAGE: UsageSnapshot = { audioSeconds: 0, translationRequests: 0, inputTokens: 0, outputTokens: 0, estimatedUsd: 0, isEstimate: true };
@@ -34,9 +36,12 @@ export default function App() {
   const [showKey, setShowKey] = useState(false);
   const [keyExpanded, setKeyExpanded] = useState(() => !apiKey.trim());
   const [vocabulary, setVocabulary] = useState(() => loadVocabulary());
-  const [direction, setDirection] = useState<Direction>('zh-ja');
+  const [pair, setPair] = useState<LanguagePair>('zh-ja');
+  const direction = defaultDirection(pair);
   const [mode, setMode] = useState<Mode>('saving');
   const [budget, setBudget] = useState('');
+  const [exchangeRate, setExchangeRate] = useState(() => String(loadExchangeRate()));
+  const [sessionExchangeRate, setSessionExchangeRate] = useState(() => loadExchangeRate());
   const [showOriginal, setShowOriginal] = useState(true);
   const [status, setStatus] = useState<Status>('idle');
   const [message, setMessage] = useState(() => apiKey.trim()
@@ -54,6 +59,7 @@ export default function App() {
   const secure = window.isSecureContext && location.protocol !== 'file:';
   const supported = Boolean(navigator.mediaDevices?.getUserMedia) && typeof AudioContext !== 'undefined' && 'audioWorklet' in AudioContext.prototype;
   const running = ['connecting', 'ready', 'listening', 'finishing'].includes(status);
+  const displayRate = running || !validExchangeRate(Number(exchangeRate)) ? sessionExchangeRate : Number(exchangeRate);
 
   function changeStatus(value: Status) { statusRef.current = value; setStatus(value); }
 
@@ -79,16 +85,17 @@ export default function App() {
   function start() {
     if (['connecting', 'ready', 'listening', 'finishing'].includes(statusRef.current)) return;
     if (!apiKey.trim() || !secure || !supported) return;
-    const amount = budget.trim() ? Number(budget) : undefined;
-    if (amount !== undefined && (!Number.isFinite(amount) || amount <= 0)) {
-      setMessage('預算請填大於 0 的美元金額，或留空。'); return;
-    }
+    let amount: number | undefined;
+    const rate = Number(exchangeRate);
+    try { amount = twdBudgetToUsd(budget, rate); }
+    catch (error) { setMessage(error instanceof Error ? error.message : '請檢查預算與匯率。'); return; }
     session.current?.dispose();
     changeStatus('connecting');
     dispatchCaptions({ type: 'start-session' }); setUsage(EMPTY_USAGE); setElapsed(0);
     setKeyExpanded(false);
+    setSessionExchangeRate(rate);
     startedAt.current = Date.now(); followBottom.current = true;
-    const next = new BrowserTranslationSession({ apiKey: apiKey.trim(), direction, mode, budgetUsd: amount,
+    const next = new BrowserTranslationSession({ apiKey: apiKey.trim(), direction, pair, mode, budgetUsd: amount,
       customVocabulary: parseVocabulary(vocabulary), context: captions.slice(-4)
         .map(item => `${DIRECTIONS[item.direction].sourceLabel}: ${item.original}`).join('\n').slice(-512) }, receive);
     session.current = next;
@@ -146,7 +153,7 @@ export default function App() {
   const time = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`;
   return <main className={`page-shell ${running ? 'session-active' : ''}`}>
     <header className="hero">
-      <div><p className="eyebrow">LIVE TEXT INTERPRETER</p><h1>即時翻譯字幕</h1><p>Gemini AI 聽寫，再即時翻譯。手機與電腦都能使用。</p></div>
+      <div><p className="eyebrow">LIVE TEXT INTERPRETER</p><h1>即時翻譯字幕</h1><p>選兩種語言，輪流說就能自動互譯。手機與電腦都能使用。</p></div>
       <span className={`status status-${status}`}><i />{LABEL[status]}</span>
     </header>
 
@@ -172,13 +179,13 @@ export default function App() {
     </section>
 
     <section className="control-panel">
-      <label>翻譯方向<select value={direction} disabled={running} onChange={event => setDirection(event.target.value as Direction)}>
-        {Object.entries(DIRECTIONS).map(([value, item]) => <option value={value} key={value}>{item.sourceLabel} → {item.targetLabel}</option>)}
+      <label>翻譯語言（雙向）<select value={pair} disabled={running} onChange={event => setPair(event.target.value as LanguagePair)}>
+        {Object.entries(LANGUAGE_PAIRS).map(([value, item]) => <option value={value} key={value}>{item.label}</option>)}
       </select></label>
       <label>更新模式<select value={mode} disabled={running} onChange={event => setMode(event.target.value as Mode)}>
         <option value="saving">省預算（約 1.5 秒）</option><option value="fast">快速（約 1 秒）</option>
       </select></label>
-      <label>本場預算上限（美元）<input value={budget} disabled={running} inputMode="decimal" placeholder="留空不限制" onChange={event => setBudget(event.target.value)} /></label>
+      <label>本場預算上限（台幣）<input value={budget} disabled={running} inputMode="decimal" placeholder="NT$，留空不限制" onChange={event => setBudget(event.target.value)} /></label>
       <div className="main-actions">
         <button className="primary" disabled={running || !apiKey.trim() || !secure || !supported} onClick={start}>● {captions.length ? '繼續聆聽' : '開始聆聽'}</button>
         <button className="stop" disabled={!running || status === 'finishing'} onClick={() => void session.current?.stop()}>■ 停止</button>
@@ -191,16 +198,16 @@ export default function App() {
         onChange={event => { setVocabulary(event.target.value); saveVocabulary(event.target.value); }} />
       <p>以逗號或換行分隔，最多 100 詞。AI 會在翻譯時一併校對最近語句；有明確線索才回頭修正。常用詞會在此瀏覽器記住。</p>
     </details>
-    <section className="session-bar" aria-live="polite"><div><strong>{DIRECTIONS[direction].sourceLabel} → {DIRECTIONS[direction].targetLabel}</strong><span>{message}</span></div><time>{time}</time></section>
+    <section className="session-bar" aria-live="polite"><div><strong>{LANGUAGE_PAIRS[pair].label}</strong><span>{message}</span></div><time>{time}</time></section>
     <section className="workspace">
-      <div className="section-title"><div><h2>字幕紀錄</h2><p>換語言或繼續聆聽會保留紀錄；較淡文字仍在修正中。</p></div>
+      <div className="section-title"><div><h2>字幕紀錄</h2><p>雙向聆聽，自動判斷每句語言；較淡文字仍在修正中。</p></div>
         <label className="switch"><input type="checkbox" checked={showOriginal} onChange={event => setShowOriginal(event.target.checked)} />顯示原文</label></div>
       <div className="captions" ref={captionPane} onScroll={event => {
         const pane = event.currentTarget; followBottom.current = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
       }}>
         {!captions.length && <div className="empty"><span>聲</span><p>按開始，讓語言跟上你的對話</p><small>請保持頁面開啟；切到背景會自動停止。</small></div>}
         {paragraphs.map((item, index) => <Fragment key={item.id}>
-          {(index === 0 || paragraphs[index - 1].sessionId !== item.sessionId) && <div className="session-divider">
+          {(index === 0 || paragraphs[index - 1].sessionId !== item.sessionId || paragraphs[index - 1].direction !== item.direction) && <div className="session-divider">
             <strong>{DIRECTIONS[item.direction].sourceLabel} → {DIRECTIONS[item.direction].targetLabel}</strong>
             <time>{new Date(item.receivedAt).toLocaleTimeString('zh-TW', {hour:'2-digit', minute:'2-digit'})}</time></div>}
           <article className="caption">
@@ -219,8 +226,16 @@ export default function App() {
       <div><span>傳送音訊</span><strong>{usage.audioSeconds.toFixed(1)} 秒</strong></div>
       <div><span>翻譯請求</span><strong>{usage.translationRequests}</strong></div>
       <div><span>文字 Tokens{usage.tokenEstimate ? '（估算）' : ''}</span><strong>{usage.inputTokens ?? '未知'} / {usage.outputTokens ?? '未知'}</strong></div>
-      <div><span>估算費用</span><strong>US${usage.estimatedUsd.toFixed(4)}</strong></div>
+      <div><span>估算費用（台幣）</span><strong>{formatTwd(usdToTwd(usage.estimatedUsd, displayRate))}</strong>
+        <small>US$1 ≈ NT${displayRate.toLocaleString('zh-TW', {maximumFractionDigits:4})}</small></div>
     </section>
-    <footer>版本 2.2 · 本頁只輸出文字，重新整理會清除字幕紀錄，請先下載。費用與預算停止皆為估算，實際以 Google 為準。<br />{MODELS.stt} ＋ {MODELS.translation}</footer>
+    <details className="recognition-settings cost-settings"><summary>調整台幣換算匯率</summary>
+      <label htmlFor="exchange-rate">1 美元換算多少台幣</label>
+      <input id="exchange-rate" value={exchangeRate} disabled={running} inputMode="decimal" onChange={event => {
+        setExchangeRate(event.target.value); saveExchangeRate(Number(event.target.value));
+      }} />
+      <p>此為可調整、會記住的參考匯率，不會自動更新。預設參考 <a href={EXCHANGE_RATE_SOURCE} target="_blank" rel="noreferrer">臺灣銀行 {EXCHANGE_RATE_DATE} 牌告</a>。實際台幣扣款依 Google 與付款方式的匯率為準。</p>
+    </details>
+    <footer>版本 2.3 · 本頁只輸出文字，重新整理會清除字幕紀錄，請先下載。台幣費用與預算停止皆為估算，實際以帳單為準。<br />{MODELS.stt} ＋ {MODELS.translation}</footer>
   </main>;
 }

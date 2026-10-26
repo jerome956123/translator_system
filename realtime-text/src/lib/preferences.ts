@@ -1,6 +1,9 @@
+import { DEFAULT_USD_TWD, validExchangeRate } from './currency';
+
 // 個人使用：只存於目前瀏覽器的此網站，不寫入 HTML 或 GitHub。
 export const API_KEY_STORAGE_KEY = 'realtime-translator.api-key.v1';
 const VOCABULARY_STORAGE_KEY = 'realtime-translator.vocabulary.v1';
+const EXCHANGE_RATE_STORAGE_KEY = 'realtime-translator.usd-twd.v1';
 type KeyStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 function loadPreference(key: string, storage?: KeyStorage): string {
@@ -21,6 +24,13 @@ export const loadApiKey = (storage?: KeyStorage) => loadPreference(API_KEY_STORA
 export const saveApiKey = (value: string, storage?: KeyStorage) => savePreference(API_KEY_STORAGE_KEY, value, storage);
 export const loadVocabulary = () => loadPreference(VOCABULARY_STORAGE_KEY);
 export const saveVocabulary = (value: string) => savePreference(VOCABULARY_STORAGE_KEY, value);
+export function loadExchangeRate(storage?: KeyStorage): number {
+  const saved = Number(loadPreference(EXCHANGE_RATE_STORAGE_KEY, storage));
+  return validExchangeRate(saved) ? saved : DEFAULT_USD_TWD;
+}
+export function saveExchangeRate(value: number, storage?: KeyStorage): boolean {
+  return validExchangeRate(value) && savePreference(EXCHANGE_RATE_STORAGE_KEY, String(value), storage);
+}
 
 export function parseVocabulary(value: string): string[] {
   return [...new Set(value.split(/[\n,，、;；]+/u).map(term => term.trim()).filter(Boolean))]

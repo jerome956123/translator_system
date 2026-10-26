@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { API_KEY_STORAGE_KEY, loadApiKey, saveApiKey, parseVocabulary } from '../src/lib/preferences';
+import { API_KEY_STORAGE_KEY, loadApiKey, saveApiKey, parseVocabulary, loadExchangeRate, saveExchangeRate } from '../src/lib/preferences';
 
 function memoryStorage() {
   const data = new Map<string, string>();
@@ -29,5 +29,13 @@ describe('個人瀏覽器記憶設定', () => {
     expect(parseVocabulary(' 國立中央大學、Gemini\n國立中央大學，雙聯學位;\n')).toEqual(['國立中央大學', 'Gemini', '雙聯學位']);
     expect(parseVocabulary('字'.repeat(201))).toEqual([]);
     expect(parseVocabulary(Array.from({ length: 130 }, (_, i) => `term ${i}`).join(','))).toHaveLength(100);
+  });
+  it('記住自訂匯率，非法數字不覆蓋既有值，無設定時有參考值', () => {
+    const storage = memoryStorage();
+    expect(loadExchangeRate(storage)).toBe(32.58);
+    expect(saveExchangeRate(33.25, storage)).toBe(true);
+    expect(loadExchangeRate(storage)).toBe(33.25);
+    expect(saveExchangeRate(0, storage)).toBe(false);
+    expect(loadExchangeRate(storage)).toBe(33.25);
   });
 });

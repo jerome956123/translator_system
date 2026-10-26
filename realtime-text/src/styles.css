@@ -83,6 +83,8 @@ button.stop { color: #ffbbc2; background: #31141c; border-color: #63303b; }
 .usage-grid div:last-child { border-right: 0; }
 .usage-grid span { display: block; color: #748aa4; font-size: 12px; margin-bottom: 4px; }
 .usage-grid strong { font-size: 17px; font-variant-numeric: tabular-nums; }
+.usage-grid small { display: block; margin-top: 4px; font-size: 11px; color: #8097b2; }
+.cost-settings input { max-width: 240px; }
 footer { color: #60748c; text-align: center; font-size: 11px; line-height: 1.7; padding: 18px; }
 @media (max-width: 880px) {
   .control-panel { grid-template-columns: 1fr 1fr; }

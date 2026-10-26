@@ -8,6 +8,43 @@ function options() { return { apiKey: 'fake-private-key', text: '你好', contex
   signal: new AbortController().signal, onChunk: vi.fn(), onUsage: vi.fn() }; }
 
 describe('瀏覽器 SSE 文字串流與費用', () => {
+  it('回覆方向與語音標記衝突時，不先顯示反方向的串流譯文', async () => {
+    const json=JSON.stringify({sourceLanguage:'zh',original:'青森大学',translation:'青森大學',corrections:[]});
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response('data: '+JSON.stringify({candidates:[{
+      content:{parts:[{text:json}]},finishReason:'STOP',
+    }]})+'\n\n')));
+    const o={...options(),pair:'zh-ja' as const,audioLanguage:'ja' as const};
+    await expect(streamTranslation(o)).rejects.toThrow('不一致');
+    expect(o.onChunk).not.toHaveBeenCalled();
+    const config=JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string).generationConfig;
+    expect(config.responseJsonSchema.properties.sourceLanguage.enum).toEqual(['ja']);
+  });
+  it.each([
+    {language:'ja',original:'来週青森へ行きます。',translation:'下周去青森。',expected:'下週去青森。',direction:'ja-zh'},
+    {language:'zh',original:'下周去青森。',translation:'来週青森へ行きます。',expected:'来週青森へ行きます。',direction:'zh-ja'},
+  ])('雙向串流以 AI 判定的 $language 語言決定方向與中文轉字', async data => {
+    const json = JSON.stringify({sourceLanguage:data.language,original:data.original,translation:data.translation,corrections:[]});
+    const body = [json.slice(0,35),json.slice(35)].map(text => 'data: '+JSON.stringify({
+      candidates:[{content:{parts:[{text}]}}],
+    })+'\n\n').join('') + 'data: '+JSON.stringify({candidates:[{finishReason:'STOP'}]})+'\n\n';
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response(body)));
+    const o = {...options(),pair:'zh-ja' as const,text:data.original};
+    const result = await streamTranslation(o);
+    expect(result.direction).toBe(data.direction); expect(result.text).toBe(data.expected);
+    expect(o.onChunk).toHaveBeenLastCalledWith(data.expected,data.direction);
+    if (data.language==='ja') expect(result.original).toContain('来週');
+    const config = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string).generationConfig;
+    expect(config.responseJsonSchema.properties.sourceLanguage.enum).toEqual(['zh','ja']);
+  });
+  it('不將配對外語言的回覆當成成功雙向翻譯，避免顯示錯誤方向', async () => {
+    const json = JSON.stringify({sourceLanguage:'en',original:'Hello',translation:'你好',corrections:[]});
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response('data: '+JSON.stringify({candidates:[{
+      content:{parts:[{text:json}]},finishReason:'STOP',
+    }]})+'\n\n')));
+    const o = {...options(),pair:'zh-ja' as const};
+    await expect(streamTranslation(o)).rejects.toThrow('語言');
+    expect(o.onChunk).not.toHaveBeenCalled();
+  });
   it('跨網路封包解碼 UTF-8，metadata 用累計值覆寫且忽略 thought', async () => {
     const json = JSON.stringify({original: '你好', translation: 'こんにちは', corrections: []});
     const data = 'data: ' + JSON.stringify({ candidates: [{ content: { parts: [{ thought: true, text: '隱藏推理' }, { text: json.slice(0, 38) }] } }], usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 2 } })

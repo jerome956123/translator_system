@@ -1,13 +1,13 @@
 import { MODELS, redactKey } from './config';
 
 interface Callbacks {
-  onInterim: (text: string) => void;
-  onFinal: (text: string) => void;
+  onInterim: (text: string, languageCode?: string) => void;
+  onFinal: (text: string, languageCode?: string) => void;
   onError: (message: string) => void;
 }
 
 export interface STTConnection {
-  connect: (apiKey: string, language: string, customVocabulary?: string[]) => Promise<void>;
+  connect: (apiKey: string, language: string | string[], customVocabulary?: string[]) => Promise<void>;
   sendAudio: (pcm: ArrayBuffer) => boolean;
   endAudio: () => void;
   close: () => void;
@@ -21,7 +21,7 @@ export class GeminiBrowserSTT implements STTConnection {
 
   constructor(private callbacks: Callbacks) {}
 
-  connect(apiKey: string, language: string, customVocabulary: string[] = []) {
+  connect(apiKey: string, language: string | string[], customVocabulary: string[] = []) {
     return new Promise<void>((resolve, reject) => {
       this.rejectConnect = reject;
       const socket = new WebSocket(`wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`);
@@ -36,7 +36,7 @@ export class GeminiBrowserSTT implements STTConnection {
         socket.send(JSON.stringify({ setup: {
           model: `models/${MODELS.stt}`, generationConfig: { responseModalities: ['TEXT'] },
           inputAudioTranscription: {
-            languageCodes: [language], mode: 'SMART',
+            languageCodes: Array.isArray(language) ? language : [language], mode: 'SMART',
             ...(customVocabulary.length ? { customVocabulary } : {}),
           },
           // 保留短停頓中的同一句；草稿仍持續輸出，不必等到停頓結束。
@@ -56,8 +56,16 @@ export class GeminiBrowserSTT implements STTConnection {
             this.ready = true; clearTimeout(timeout); resolve();
           }
           const content = message.serverContent;
-          if (content?.interimInputTranscription?.text) this.callbacks.onInterim(content.interimInputTranscription.text);
-          if (content?.inputTranscription?.text) this.callbacks.onFinal(content.inputTranscription.text);
+          const interim = content?.interimInputTranscription;
+          const final = content?.inputTranscription;
+          if (interim?.text) {
+            if (typeof interim.languageCode === 'string') this.callbacks.onInterim(interim.text, interim.languageCode);
+            else this.callbacks.onInterim(interim.text);
+          }
+          if (final?.text) {
+            if (typeof final.languageCode === 'string') this.callbacks.onFinal(final.text, final.languageCode);
+            else this.callbacks.onFinal(final.text);
+          }
           if (message.goAway) this.callbacks.onError('Gemini 要求結束本次連線，請重新開始一場；已保留收到的字幕。');
         }).catch(error => {
           clearTimeout(timeout);

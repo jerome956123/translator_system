@@ -1,4 +1,4 @@
-import { DIRECTIONS, type ServerMessage } from '../../shared/protocol';
+import { DIRECTIONS, type Direction, type Language, type ServerMessage } from '../../shared/protocol';
 import { AudioCapture } from '../audio/capture';
 import { readableError } from './config';
 import { GeminiBrowserSTT, type STTConnection } from './stt';
@@ -8,6 +8,7 @@ import { streamTranslation } from './translator';
 import { UsageTracker } from './usage';
 import { sourceText, translatedText } from './chinese';
 import type { SessionSettings, TranslationTask, TranslationResult, ReviewCaption } from './types';
+import { directionSource, directionFor, isPairLanguage, languageFromCode, previewDirection } from './languages';
 
 interface Capture {
   prepare: () => Promise<void>;
@@ -16,7 +17,7 @@ interface Capture {
 }
 interface Dependencies {
   capture?: Capture;
-  createSTT?: (callbacks: { onInterim: (text: string) => void; onFinal: (text: string) => void; onError: (message: string) => void }) => STTConnection;
+  createSTT?: (callbacks: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onError: (message: string) => void }) => STTConnection;
   translate?: typeof streamTranslation;
 }
 
@@ -37,14 +38,20 @@ export class BrowserTranslationSession {
   private finishTimer?: ReturnType<typeof setTimeout>;
   private tasks = new Map<string, TranslationTask>();
   private receivedAt = new Map<string, number>();
-  private edited = new Map<string, { original: string; translation: string }>();
+  private edited = new Map<string, { original: string; translation: string; direction: Direction }>();
+  private previousLanguage: Language;
+  private speechAudioLanguage?: Language;
 
   constructor(private settings: SessionSettings, private emit: (event: ServerMessage) => void, dependencies: Dependencies = {}) {
     this.capture = dependencies.capture ?? new AudioCapture();
-    this.assembler = new TranscriptAssembler(this.id, settings.direction);
+    this.previousLanguage = directionSource(settings.direction);
+    // 雙向對話的辨識輪次分開翻譯，避免不同語言／說話者黏成同一句；同方向仍合併顯示。
+    this.assembler = new TranscriptAssembler(this.id, settings.direction, Date.now, !settings.pair);
     const callbacks = {
-      onInterim: (text: string) => this.transcript(text, false),
-      onFinal: (text: string) => { this.transcript(text, true); this.finalArrived?.(); },
+      onInterim: (text: string, languageCode?: string) => this.transcript(text, false, languageCode),
+      onFinal: (text: string, languageCode?: string) => {
+        this.transcript(text, true, languageCode); this.speechAudioLanguage = undefined; this.finalArrived?.();
+      },
       onError: (message: string) => { if (!this.stopping && !this.disposed) this.fail(message); },
     };
     this.stt = dependencies.createSTT?.(callbacks) ?? new GeminiBrowserSTT(callbacks);
@@ -58,11 +65,12 @@ export class BrowserTranslationSession {
           this.sendUsage(); this.budget();
         },
       }),
-      onTranslation: (task, requestId, text, complete) => {
-        const localized = translatedText(text, settings.direction);
-        this.edited.set(task.captionId, { original: this.edited.get(task.captionId)?.original ?? task.text, translation: localized });
+      onTranslation: (task, requestId, text, complete, detectedDirection) => {
+        const direction = detectedDirection ?? task.direction;
+        const localized = translatedText(text, direction);
+        this.edited.set(task.captionId, { original: this.edited.get(task.captionId)?.original ?? sourceText(task.text, direction), translation: localized, direction });
         this.send({ type: 'translation', sessionId: this.id, captionId: task.captionId, revision: task.revision,
-          requestId, text: localized, final: task.final && complete });
+          requestId, direction, text: localized, final: task.final && complete });
       },
       onResult: (task, _requestId, result) => this.applyResult(task, result),
       onError: message => { if (!this.disposed) this.fail(message); },
@@ -78,8 +86,10 @@ export class BrowserTranslationSession {
       captionId: item.captionId, revision: item.revision, raw: item.text,
       original: this.edited.get(item.captionId)?.original ?? item.text,
       translation: this.edited.get(item.captionId)?.translation ?? '',
+      direction: this.edited.get(item.captionId)?.direction ?? item.direction,
+      audioLanguage: item.audioLanguage,
     }));
-    return { ...task, review,
+    return { ...task, review, pair: this.settings.pair,
       context: [this.settings.context ?? '', ...preceding.slice(-4)
         .map(item => this.edited.get(item.captionId)?.original ?? item.text)].filter(Boolean).join('\n').slice(-512),
       following: tasks.slice(index + 1, index + 3).map(item => item.text).join('\n').slice(0, 220),
@@ -92,26 +102,31 @@ export class BrowserTranslationSession {
     const current = this.tasks.get(task.captionId);
     // 相容前綴可以先顯示譯文，但不能用舊句的校對結果覆寫新原文。
     if (!current || current.revision !== task.revision || current.text !== task.text) return;
-    if (result.original?.trim()) this.applyEdit(current, result.original, result.text);
+    if (result.original?.trim()) this.applyEdit(current, result.original, result.text, result.direction ?? current.direction);
     for (const correction of result.corrections ?? []) {
       const supplied = task.review?.find(item => item.captionId === correction.captionId && item.revision === correction.revision);
       const target = this.tasks.get(correction.captionId);
       if (!supplied || !target?.final || target.revision !== supplied.revision || target.text !== supplied.raw
         || correction.confidence !== 'high' || !correction.evidence.trim()
         || Date.now() - (this.receivedAt.get(target.captionId) ?? 0) > 45000) continue;
+      if (this.settings.pair && !isPairLanguage(correction.sourceLanguage, this.settings.pair)) continue;
+      if (target.audioLanguage && correction.sourceLanguage !== target.audioLanguage) continue;
       // 校正最近的同音詞；不讓舊待譯工作再把修正後的譯文蓋回去。
       this.scheduler.remove([target.captionId]);
-      this.applyEdit(target, correction.original, correction.translation);
+      const direction = this.settings.pair ? directionFor(this.settings.pair, correction.sourceLanguage!) : target.direction;
+      this.applyEdit(target, correction.original, correction.translation, direction);
     }
   }
 
-  private applyEdit(task: TranslationTask, original: string, translation: string) {
+  private applyEdit(task: TranslationTask, original: string, translation: string, direction: Direction) {
     if (!original.trim() || !translation.trim()) return;
-    const localized = { original: sourceText(original.trim(), this.settings.direction),
-      translation: translatedText(translation.trim(), this.settings.direction) };
+    const localized = { original: sourceText(original.trim(), direction),
+      translation: translatedText(translation.trim(), direction), direction };
     this.edited.set(task.captionId, localized);
+    this.tasks.set(task.captionId, {...task, direction});
+    if ([...this.tasks.keys()].at(-1) === task.captionId) this.previousLanguage = directionSource(direction);
     this.send({ type: 'caption-correction', sessionId: this.id, captionId: task.captionId,
-      revision: task.revision, ...localized, final: task.final, corrected: localized.original !== task.text });
+      revision: task.revision, ...localized, final: task.final, corrected: localized.original !== sourceText(task.text, direction) });
   }
 
   private send(event: ServerMessage) { if (!this.disposed) this.emit(event); }
@@ -127,11 +142,13 @@ export class BrowserTranslationSession {
       // 先解鎖音訊處理，再等待網路；符合手機瀏覽器的使用者手勢要求。
       await this.capture.prepare();
       if (this.stopping || this.disposed) return;
-      await this.stt.connect(this.settings.apiKey, DIRECTIONS[this.settings.direction].source, this.settings.customVocabulary);
+      await this.stt.connect(this.settings.apiKey, this.settings.pair ? [] : DIRECTIONS[this.settings.direction].source, this.settings.customVocabulary);
       if (this.stopping || this.disposed) return;
       this.ready = true;
       await this.capture.start(chunk => this.audio(chunk));
-      if (!this.stopping && !this.disposed) this.status('listening', 'Gemini AI 正在聆聽。草稿會隨後續語音修正，短暫停頓會接在同一段。');
+      if (!this.stopping && !this.disposed) this.status('listening', this.settings.pair
+        ? '正在雙向聆聽。兩種語言可以輪流說，AI 會自動翻成另一種語言。'
+        : 'Gemini AI 正在聆聽。草稿會隨後續語音修正，短暫停頓會接在同一段。');
     } catch (error) {
       if (!this.stopping && !this.disposed) {
         const hint = error instanceof DOMException && error.name === 'NotAllowedError'
@@ -153,9 +170,16 @@ export class BrowserTranslationSession {
     } catch (error) { this.fail(readableError(error)); }
   }
 
-  private transcript(text: string, final: boolean) {
+  private transcript(text: string, final: boolean, languageCode?: string) {
     if (this.disposed || !text.trim()) return;
-    const { changed, removed } = this.assembler.update(sourceText(text, this.settings.direction), final);
+    const detected = languageFromCode(languageCode);
+    if (this.settings.pair && isPairLanguage(detected, this.settings.pair)) this.speechAudioLanguage = detected;
+    const audioLanguage = this.settings.pair ? this.speechAudioLanguage : undefined;
+    const direction = this.settings.pair
+      ? audioLanguage ? directionFor(this.settings.pair, audioLanguage) : previewDirection(text, this.settings.pair, this.previousLanguage)
+      : this.settings.direction;
+    const { changed, removed } = this.assembler.update(text, final, direction, audioLanguage);
+    if (final) this.previousLanguage = directionSource(direction);
     if (removed.length) {
       this.scheduler.remove(removed);
       for (const id of removed) { this.tasks.delete(id); this.edited.delete(id); this.receivedAt.delete(id); }
@@ -166,7 +190,8 @@ export class BrowserTranslationSession {
       this.receivedAt.set(task.captionId, Date.now());
       this.edited.delete(task.captionId);
       this.send({ type: 'transcript', sessionId: this.id, captionId: task.captionId, revision: task.revision,
-        paragraphId: task.paragraphId, text: task.text, final: task.final, receivedAt: Date.now() });
+        paragraphId: task.paragraphId, direction: task.direction, rawText: task.text,
+        text: sourceText(task.text, task.direction), final: task.final, receivedAt: Date.now() });
       this.scheduler.enqueue(task);
     }
     while (this.tasks.size > 64) {

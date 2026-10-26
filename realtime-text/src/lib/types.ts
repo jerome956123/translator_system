@@ -1,7 +1,8 @@
-import type { Direction, Mode } from '../../shared/protocol';
+import type { Direction, Language, LanguagePair, Mode } from '../../shared/protocol';
 
 export interface TranslationResult {
   text: string;
+  direction?: Direction;
   original?: string;
   corrections?: ContextCorrection[];
   inputTokens?: number;
@@ -14,6 +15,8 @@ export interface ReviewCaption {
   raw: string;
   original: string;
   translation: string;
+  direction?: Direction;
+  audioLanguage?: Language;
 }
 
 export interface ContextCorrection {
@@ -23,6 +26,7 @@ export interface ContextCorrection {
   translation: string;
   confidence: 'high';
   evidence: string;
+  sourceLanguage?: Language;
 }
 
 export interface TranslationTask {
@@ -34,6 +38,8 @@ export interface TranslationTask {
   text: string;
   context: string;
   direction: Direction;
+  pair?: LanguagePair;
+  audioLanguage?: Language;
   final: boolean;
   review?: ReviewCaption[];
   following?: string;
@@ -43,6 +49,7 @@ export interface TranslationTask {
 export interface SessionSettings {
   apiKey: string;
   direction: Direction;
+  pair?: LanguagePair;
   mode: Mode;
   budgetUsd?: number;
   customVocabulary?: string[];
@@ -57,6 +64,7 @@ export interface Caption {
   paragraphId: string;
   revision: number;
   original: string;
+  rawOriginal?: string;
   translation: string;
   translationRevision: number;
   originalFinal: boolean;

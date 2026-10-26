@@ -29,8 +29,8 @@ export function groupCaptions(captions: Caption[]): CaptionParagraph[] {
   const paragraphs: CaptionParagraph[] = [];
   for (const caption of captions) {
     let paragraph = paragraphs.at(-1);
-    if (paragraph?.id !== caption.paragraphId) {
-      paragraph = { id: caption.paragraphId, captions: [], original: '', translation: '', originalFinal: true, translationFinal: true,
+    if (!paragraph || paragraph.captions.at(-1)?.paragraphId !== caption.paragraphId || paragraph.direction !== caption.direction) {
+      paragraph = { id: `${caption.paragraphId}-${caption.id}`, captions: [], original: '', translation: '', originalFinal: true, translationFinal: true,
         sessionId: caption.sessionId, direction: caption.direction, receivedAt: caption.receivedAt, corrected: false };
       paragraphs.push(paragraph);
     }
@@ -46,7 +46,7 @@ export function groupCaptions(captions: Caption[]): CaptionParagraph[] {
 
 export function exportParagraphs(paragraphs: CaptionParagraph[], showOriginal: boolean): string {
   return paragraphs.map((item, index) => [
-    index === 0 || paragraphs[index - 1].sessionId !== item.sessionId
+    index === 0 || paragraphs[index - 1].sessionId !== item.sessionId || paragraphs[index - 1].direction !== item.direction
       ? `【${DIRECTIONS[item.direction].sourceLabel} → ${DIRECTIONS[item.direction].targetLabel}】` : '',
     showOriginal ? `[原文${item.originalFinal ? '' : '草稿'}] ${item.original}` : '',
     item.translation ? `[譯文${item.translationFinal ? '' : '（草稿）'}] ${item.translation}` : '',

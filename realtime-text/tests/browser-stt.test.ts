@@ -20,6 +20,28 @@ const settle = async () => { await Promise.resolve(); await Promise.resolve(); a
 afterEach(() => vi.unstubAllGlobals());
 
 describe('瀏覽器直連語音協定', () => {
+  it('保留 Gemini 根據聲音判定的語言代碼，不丟掉純漢字短句的語言資訊', async () => {
+    vi.stubGlobal('WebSocket',Socket);
+    const onInterim=vi.fn(); const onFinal=vi.fn();
+    const stt = new GeminiBrowserSTT({onInterim,onFinal,onError:vi.fn()});
+    const connected=stt.connect('fake-key',[]);
+    Socket.current.onmessage?.({data:'{"setupComplete":{}}'}); await connected;
+    Socket.current.onmessage?.({data:JSON.stringify({serverContent:{
+      interimInputTranscription:{text:'青森大学',languageCode:'ja-JP'},
+      inputTranscription:{text:'青森大学',languageCode:'ja-JP'},
+    }})}); await settle();
+    expect(onInterim).toHaveBeenCalledWith('青森大学','ja-JP');
+    expect(onFinal).toHaveBeenCalledWith('青森大学','ja-JP');
+    stt.close();
+  });
+  it('雙向模式啟用 Gemini 自動辨識語言，不把連線固定為其中一種語言', async () => {
+    vi.stubGlobal('WebSocket', Socket);
+    const stt = new GeminiBrowserSTT({onInterim:vi.fn(),onFinal:vi.fn(),onError:vi.fn()});
+    const connected = stt.connect('fake-key',[],['青森']);
+    Socket.current.onopen?.();
+    expect(JSON.parse(Socket.current.sent[0]).setup.inputAudioTranscription.languageCodes).toEqual([]);
+    Socket.current.onmessage?.({data:'{"setupComplete":{}}'}); await connected; stt.close();
+  });
   it('使用純文字設定、處理 Blob 與字串事件，送出 PCM 和尾端結束訊號', async () => {
     vi.stubGlobal('WebSocket', Socket);
     const onInterim = vi.fn(); const onFinal = vi.fn(); const onError = vi.fn();

@@ -1,10 +1,11 @@
 import type { TranslationResult, TranslationTask } from './types';
+import type { Direction } from '../../shared/protocol';
 
 interface Options {
   intervalMs: number;
   maxPending?: number;
-  translate: (task: TranslationTask, requestId: string, onChunk: (text: string) => void, signal: AbortSignal) => Promise<TranslationResult>;
-  onTranslation: (task: TranslationTask, requestId: string, text: string, complete: boolean) => void;
+  translate: (task: TranslationTask, requestId: string, onChunk: (text: string, direction?: Direction) => void, signal: AbortSignal) => Promise<TranslationResult>;
+  onTranslation: (task: TranslationTask, requestId: string, text: string, complete: boolean, direction?: Direction) => void;
   onError: (message: string) => void;
   prepareTask?: (task: TranslationTask) => TranslationTask;
   onResult?: (task: TranslationTask, requestId: string, result: TranslationResult) => void;
@@ -43,18 +44,18 @@ export class TranslationScheduler {
   }
 
   private signature(task: TranslationTask) { return JSON.stringify([
-    task.direction, task.context, task.text, task.review, task.following, task.vocabulary,
+    task.direction, task.pair, task.audioLanguage, task.context, task.text, task.review, task.following, task.vocabulary,
   ]); }
 
   private current(task: TranslationTask) {
     const latest = this.latest.get(task.captionId);
-    if (!latest || this.closed) return false;
+    if (!latest || this.closed || latest.direction !== task.direction) return false;
     // 連續說話時允許顯示已翻完的前綴；否定、數字與等長修正不相容。
     return latest.text === task.text || (!latest.final && latest.text.startsWith(task.text));
   }
 
-  private emit(task: TranslationTask, id: string, text: string, complete: boolean) {
-    if (this.current(task)) this.options.onTranslation(task, id, text, complete);
+  private emit(task: TranslationTask, id: string, text: string, complete: boolean, direction?: Direction) {
+    if (this.current(task)) this.options.onTranslation(task, id, text, complete, direction ?? task.direction);
   }
 
   private schedule() {
@@ -77,7 +78,7 @@ export class TranslationScheduler {
     try {
       const cached = this.cache.get(signature);
       if (cached !== undefined) {
-        this.emit(task, requestId, cached.text, true);
+        this.emit(task, requestId, cached.text, true, cached.direction);
         if (this.current(task)) this.options.onResult?.(task, requestId, cached);
       }
       else {
@@ -86,11 +87,11 @@ export class TranslationScheduler {
         // 每次請求最多等 12 秒，避免網路卡住後無限堆積。
         const timeout = setTimeout(() => this.controller?.abort(), 12000);
         try {
-          const result = await this.options.translate(task, requestId, text => this.emit(task, requestId, text, false), this.controller.signal);
+          const result = await this.options.translate(task, requestId, (text, direction) => this.emit(task, requestId, text, false, direction), this.controller.signal);
           if (!this.closed) {
             this.cache.set(signature, result);
             if (this.cache.size > 128) this.cache.delete(this.cache.keys().next().value!);
-            this.emit(task, requestId, result.text, true);
+            this.emit(task, requestId, result.text, true, result.direction);
             if (this.current(task)) this.options.onResult?.(task, requestId, result);
           }
         } finally { clearTimeout(timeout); }

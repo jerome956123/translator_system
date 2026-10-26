@@ -1,4 +1,4 @@
-import type { Direction } from '../../shared/protocol';
+import type { Direction, Language } from '../../shared/protocol';
 import { CONTEXT_MAX_CHARS } from './config';
 import { joinSpeech } from './paragraphs';
 import type { TranslationTask } from './types';
@@ -32,14 +32,15 @@ export class TranscriptAssembler {
   private awaitingNext = false;
   private prefix = '';
   private lastFinalText = '';
-  constructor(private sessionId: string, private direction: Direction, private now = Date.now) {}
+  constructor(private sessionId: string, private direction: Direction, private now = Date.now, private mergeFragments = true) {}
 
-  update(input: string, final: boolean) {
+  update(input: string, final: boolean, direction: Direction = this.direction, audioLanguage?: Language) {
+    const changedLanguage = direction !== this.direction;
     if (this.awaitingNext) {
       this.awaitingNext = false;
       // 同一句中途換氣：延長目前文字，讓 AI 重譯尚未完整的句子。
       // 保留有限長度，避免每次把整個段落送去重翻。
-      if (!this.previousSentenceEnded && this.now() - this.lastFinalAt < 3000 && this.lastFinalText.length < 220) {
+      if (this.mergeFragments && !changedLanguage && !this.previousSentenceEnded && this.now() - this.lastFinalAt < 3000 && this.lastFinalText.length < 220) {
         this.prefix = this.lastFinalText;
       } else {
         this.recent = [...this.recent, this.lastFinalText].slice(-2);
@@ -47,7 +48,9 @@ export class TranscriptAssembler {
         this.active = [];
         this.utterance += 1;
       }
+      if (changedLanguage) { this.paragraph += 1; this.paragraphLength = 0; }
     }
+    this.direction = direction;
     // 先前一句完整，且段落夠長或確實停頓較久，才在下一句開始新段。
     // 語音服務的 final 只代表辨識定稿，不能直接當成段落結束。
     if (!this.active.length && this.paragraphLength && this.previousSentenceEnded
@@ -63,10 +66,11 @@ export class TranscriptAssembler {
     this.active = parts.map((part, index) => {
       const previous = this.active[index];
       const context = [...this.recent, ...parts.slice(0, index)].join('\n').slice(-CONTEXT_MAX_CHARS);
-      if (previous && previous.text === part && previous.context === context && previous.final === final) return previous;
+      if (previous && previous.text === part && previous.context === context && previous.final === final
+        && previous.direction === direction && previous.audioLanguage === audioLanguage) return previous;
       const task: TranslationTask = {
         sessionId: this.sessionId, utteranceId, captionId: `${utteranceId}-c${index + 1}`,
-        paragraphId: `${this.sessionId}-p${this.paragraph}`,
+        paragraphId: `${this.sessionId}-p${this.paragraph}`, audioLanguage,
         revision: (previous?.revision ?? 0) + 1, text: part, context, direction: this.direction, final,
       };
       changed.push(task);

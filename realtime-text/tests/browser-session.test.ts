@@ -1,18 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrowserTranslationSession } from '../src/lib/session';
-import type { ServerMessage } from '../shared/protocol';
+import type { LanguagePair, ServerMessage } from '../shared/protocol';
+import { captionHistory } from '../src/lib/history';
+import { defaultDirection } from '../src/lib/languages';
+import { twdBudgetToUsd, usdToTwd } from '../src/lib/currency';
+import type { Caption } from '../src/lib/types';
 
-function harness(budgetUsd?: number, context?: string) {
+function harness(budgetUsd?: number, context?: string, pair?: LanguagePair) {
   const events: ServerMessage[] = [];
   let audio!: (data: ArrayBuffer) => void;
-  let callbacks!: { onInterim: (text: string) => void; onFinal: (text: string) => void; onError: (text: string) => void };
+  let callbacks!: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onError: (text: string) => void };
   const capture = { prepare: vi.fn(async () => {}), start: vi.fn(async (next: typeof audio) => { audio = next; }), stop: vi.fn(async () => {}) };
   const stt = { connect: vi.fn(async () => {}), sendAudio: vi.fn(() => true), endAudio: vi.fn(() => callbacks.onFinal('最後一句')), close: vi.fn() };
   const translate = vi.fn(async options => {
     options.onUsage('完整提示與前文', '訳文', 10, 2);
     options.onChunk('訳文'); return { text: '訳文' };
   });
-  const session = new BrowserTranslationSession({ apiKey: 'fake-key', direction: 'zh-ja', mode: 'saving', budgetUsd, context }, event => events.push(event), {
+  const session = new BrowserTranslationSession({ apiKey: 'fake-key', direction: pair ? defaultDirection(pair) : 'zh-ja', pair, mode: 'saving', budgetUsd, context }, event => events.push(event), {
     capture, createSTT: next => { callbacks = next; return stt; }, translate,
   });
   return { session, events, capture, stt, translate, get callbacks() { return callbacks; }, audio: (data: ArrayBuffer) => audio(data) };
@@ -20,6 +24,87 @@ function harness(budgetUsd?: number, context?: string) {
 afterEach(() => vi.useRealTimers());
 
 describe('純前端場次生命週期', () => {
+  it('先依聲音標記處理純漢字日文，同句定稿沿用標記，下句中文不沿用上一句日文', async () => {
+    vi.useFakeTimers(); const h=harness(undefined,undefined,'zh-ja');
+    h.translate.mockImplementation(async options=>({original:options.text,text:'譯文',direction:options.direction}));
+    await h.session.start(); h.callbacks.onInterim('青森大学','ja-JP'); await vi.advanceTimersByTimeAsync(10);
+    h.callbacks.onFinal('青森大学'); await vi.advanceTimersByTimeAsync(1600);
+    const first=h.events.find(event=>event.type==='transcript');
+    expect(first).toMatchObject({text:'青森大学',direction:'ja-zh'});
+    expect(h.translate.mock.calls[0][0].audioLanguage).toBe('ja');
+    h.callbacks.onFinal('今天去慶生。','cmn-Hans-CN'); await vi.advanceTimersByTimeAsync(1600);
+    expect(h.translate.mock.calls.at(-1)?.[0]).toMatchObject({direction:'zh-ja',audioLanguage:'zh'});
+    h.session.dispose();
+  });
+  it.each([
+    {pair:'zh-ja' as const, turns:[{text:'下周二去青森',direction:'zh-ja',translation:'来週火曜日に青森へ行きます。'},
+      {text:'来週火曜日に青森へ行きます。',direction:'ja-zh',translation:'下周二去青森。'}]},
+    {pair:'zh-en' as const, turns:[{text:'下周二出发',direction:'zh-en',translation:'We leave next Tuesday.'},
+      {text:'We leave next Tuesday.',direction:'en-zh',translation:'下周二出发。'}]},
+    {pair:'ja-en' as const, turns:[{text:'来週出発します',direction:'ja-en',translation:'We leave next week.'},
+      {text:'We leave next week.',direction:'en-ja',translation:'来週出発します。'}]},
+  ])('$pair 同一條收音連線雙向輪流翻譯，保留各句方向與日文漢字', async ({pair, turns}) => {
+    vi.useFakeTimers(); const h = harness(undefined,undefined,pair);
+    h.translate.mockImplementation(async options => {
+      const turn = turns.find(item=>item.text===options.text)!;
+      options.onChunk(turn.translation, turn.direction);
+      return {text:turn.translation,original:turn.text,direction:turn.direction};
+    });
+    await h.session.start();
+    for (const turn of turns) { h.callbacks.onFinal(turn.text); await vi.advanceTimersByTimeAsync(1600); }
+    expect(h.stt.connect).toHaveBeenCalledOnce();
+    expect(h.stt.connect).toHaveBeenCalledWith('fake-key',[],undefined);
+    expect(h.capture.start).toHaveBeenCalledOnce();
+    expect(h.translate).toHaveBeenCalledTimes(2);
+    expect(h.translate.mock.calls.map(call=>call[0].text)).toEqual(turns.map(turn=>turn.text));
+    let history: Caption[] = [];
+    for (const event of h.events) history = captionHistory(history,{type:'message',event,direction:defaultDirection(pair)});
+    expect(history).toHaveLength(2);
+    expect(history.map(item=>item.direction)).toEqual(turns.map(turn=>turn.direction));
+    expect(history.every(item=>item.translationFinal)).toBe(true);
+    for (const item of history) {
+      if (item.direction.startsWith('ja-')) expect(item.original).toContain('来週');
+      if (item.direction.endsWith('-zh')) expect(item.translation).toContain('下週');
+    }
+    h.session.dispose();
+  });
+
+  it('AI 可重新判斷只有漢字的日文，還原日文字形及正確翻譯方向', async () => {
+    vi.useFakeTimers(); const h = harness(undefined,undefined,'zh-ja');
+    h.translate.mockImplementation(async () => ({original:'青森大学',text:'青森大學',direction:'ja-zh'}));
+    await h.session.start(); h.callbacks.onFinal('青森大学'); await vi.advanceTimersByTimeAsync(10);
+    const correction = h.events.find(event=>event.type==='caption-correction');
+    expect(correction).toMatchObject({original:'青森大学',translation:'青森大學',direction:'ja-zh'});
+    h.session.dispose();
+  });
+
+  it('雙向上下文校正沿用被校正句自己的方向，不套用目前另一位說話者的方向', async () => {
+    vi.useFakeTimers(); const h = harness(undefined,undefined,'zh-ja');
+    h.translate.mockImplementation(async options => {
+      if (!options.text.includes('弘前')) return {original:options.text,text:'お祝いに行きます。',direction:'zh-ja'};
+      const previous = options.review[0];
+      return {original:options.text,text:'我們要去弘前城。',direction:'ja-zh',corrections:[{
+        captionId:previous.captionId,revision:previous.revision,original:'下週二去青森',translation:'来週火曜日に青森へ行きます。',
+        confidence:'high',sourceLanguage:'zh',evidence:'後句日文提到青森的弘前城',
+      }]};
+    });
+    await h.session.start(); h.callbacks.onFinal('下週二去慶生'); await vi.advanceTimersByTimeAsync(1600);
+    h.callbacks.onFinal('青森の弘前城に行きます。'); await vi.advanceTimersByTimeAsync(1600);
+    expect(h.events.filter(event=>event.type==='caption-correction')).toContainEqual(expect.objectContaining({
+      direction:'zh-ja', original:'下週二去青森',translation:'来週火曜日に青森へ行きます。',
+    }));
+    h.session.dispose();
+  });
+
+  it('以台幣設定的預算達到後停止，不能誤當成美元上限', async () => {
+    const rate = 32.58; const h = harness(twdBudgetToUsd('1', rate),undefined,'zh-ja'); await h.session.start();
+    for (let i=0; i<205; i++) h.audio(new ArrayBuffer(32000));
+    expect(h.events.some(event=>event.type==='error' && event.message.includes('上限'))).toBe(true);
+    const usage = h.events.filter(event=>event.type==='usage').at(-1)!;
+    expect(usdToTwd(usage.usage.estimatedUsd,rate)).toBeGreaterThanOrEqual(1);
+    expect(usdToTwd(usage.usage.estimatedUsd,rate)).toBeLessThan(1.01);
+    h.session.dispose();
+  });
   it('連續開始不會重複取得麥克風或建立兩條連線', async () => {
     const h = harness(); await Promise.all([h.session.start(), h.session.start()]);
     expect(h.capture.prepare).toHaveBeenCalledOnce(); expect(h.stt.connect).toHaveBeenCalledOnce();
