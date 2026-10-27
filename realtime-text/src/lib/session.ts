@@ -143,7 +143,7 @@ export class BrowserTranslationSession {
     this.started = true;
     this.status('connecting', this.settings.audioSource === 'display'
       ? '請選擇播放中的分頁，並勾選「分享分頁音訊」。只會傳送音訊，不會傳送畫面。'
-      : '請允許麥克風，正在檢查收音與辨識連線。');
+      : '請允許麥克風，會收取你說話與喇叭外放的聲音。');
     try {
       // 先解鎖音訊處理，再等待網路；符合手機瀏覽器的使用者手勢要求。
       await this.capture.prepare();
@@ -153,9 +153,9 @@ export class BrowserTranslationSession {
       this.ready = true;
       this.lastTranscriptAt = Date.now();
       await this.capture.start(chunk => this.audio(chunk), message => { if (!this.stopping) this.fail(message); });
-      if (!this.stopping && !this.disposed) this.status('listening', this.settings.pair
-        ? '音訊已開始傳送，等待辨識文字。兩種語言可以輪流說。'
-        : 'Gemini AI 正在聆聽。草稿會隨後續語音修正，短暫停頓會接在同一段。');
+      if (!this.stopping && !this.disposed) this.status('listening', this.settings.audioSource === 'display'
+        ? '分享音訊已開始傳送，等待辨識文字。'
+        : '麥克風已開始收音，可以說話或播放喇叭音訊。');
     } catch (error) {
       if (!this.stopping && !this.disposed) {
         const hint = error instanceof DOMException && error.name === 'NotAllowedError'

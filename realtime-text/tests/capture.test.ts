@@ -47,6 +47,10 @@ describe('實際收音啟動與中斷', () => {
   it('權限取得後及連線等待後恢復 AudioContext，收到第一包 PCM 才完成啟動', async () => {
     const h = harness(); const capture = new AudioCapture(); const onChunk = vi.fn();
     await capture.prepare();
+    expect(h.media.getUserMedia).toHaveBeenCalledWith({
+      audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+    });
+    expect(h.media.getDisplayMedia).not.toHaveBeenCalled();
     expect(h.audioSession.type).toBe('play-and-record');
     expect(Context.current.state).toBe('running');
     Context.current.state = 'suspended';
@@ -56,6 +60,7 @@ describe('實際收音啟動與中斷', () => {
     expect(started).toBe(false); expect(Context.current.state).toBe('running');
     Worklet.current.frame(1200); await start;
     expect(onChunk).toHaveBeenCalledOnce();
+    expect(h.media.getUserMedia).toHaveBeenCalledOnce();
     await capture.stop(false);
     expect(h.audio.stop).toHaveBeenCalledOnce(); expect(h.audioSession.type).toBe('auto');
   });

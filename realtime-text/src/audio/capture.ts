@@ -113,7 +113,8 @@ export class AudioCapture {
         systemAudio: 'include', selfBrowserSurface: 'exclude',
       } as DisplayMediaStreamOptions)
       : navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        // 同一支麥克風也要聽見喇叭外放；回音消除會嘗試移除電腦播放聲。
+        audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true },
       });
     this.prepared = (async () => {
       const stream = await media;

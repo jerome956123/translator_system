@@ -197,10 +197,6 @@ export default function App() {
     </section>
 
     <section className="control-panel">
-      <label>音訊來源<select value={audioSource} disabled={running} onChange={event => setAudioSource(event.target.value as AudioSource)}>
-        <option value="microphone">麥克風（對話）</option>
-        <option value="display" disabled={!displaySupported}>分頁／電腦音訊{!displaySupported ? '（此瀏覽器不支援）' : ''}</option>
-      </select></label>
       <label>翻譯語言（雙向）<select value={pair} disabled={running} onChange={event => setPair(event.target.value as LanguagePair)}>
         {Object.entries(LANGUAGE_PAIRS).map(([value, item]) => <option value={value} key={value}>{item.label}</option>)}
       </select></label>
@@ -214,12 +210,17 @@ export default function App() {
       </div>
     </section>
     {audioSource === 'display' && <p className="source-hint">按開始後選擇正在播放的分頁，勾選「分享分頁音訊」。分享視窗或整個螢幕時也必須包含音訊；只傳聲音，不傳畫面。</p>}
-    <div className="settings-row"><details className="recognition-settings"><summary>辨識提示與常用詞（選填）</summary>
+    <div className="settings-row"><details className="recognition-settings"><summary>收音與辨識設定（選填）</summary>
       <label htmlFor="vocabulary">常用詞：姓名、地名或專有名詞</label>
       <textarea id="vocabulary" value={vocabulary} disabled={running} maxLength={6000} rows={2}
         placeholder="例如：青森、弘前、國立中央大學、你的姓名"
         onChange={event => { setVocabulary(event.target.value); saveVocabulary(event.target.value); }} />
       <p>以逗號或換行分隔，最多 100 詞。AI 會在翻譯時一併校對最近語句；有明確線索才回頭修正。常用詞會在此瀏覽器記住。</p>
+      <label>音訊來源（進階）<select value={audioSource} disabled={running} onChange={event => setAudioSource(event.target.value as AudioSource)}>
+        <option value="microphone">麥克風（預設，含喇叭外放）</option>
+        <option value="display" disabled={!displaySupported}>分享分頁音訊（選用）{!displaySupported ? '（此瀏覽器不支援）' : ''}</option>
+      </select></label>
+      <p>一般使用直接按開始即可，同一支麥克風會收取人聲與喇叭外放的聲音，無須選分頁。</p>
     </details>
     <details className="recognition-settings cost-settings"><summary>調整台幣換算匯率</summary>
       <label htmlFor="exchange-rate">1 美元換算多少台幣</label>
@@ -238,7 +239,7 @@ export default function App() {
       <div className="captions" ref={captionPane} onScroll={event => {
         const pane = event.currentTarget; followBottom.current = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
       }}>
-        {!captions.length && <div className="empty"><span>聲</span><p>按開始，讓語言跟上你的對話</p><small>電腦可切換分頁；手機請保持此頁在前景。</small></div>}
+        {!captions.length && <div className="empty"><span>聲</span><p>{audioSource === 'microphone' ? '按開始，收聽說話與喇叭外放聲' : '按開始，分享播放分頁的音訊'}</p><small>電腦可切換分頁；手機請保持此頁在前景。</small></div>}
         {paragraphs.map((item, index) => <Fragment key={item.id}>
           {(index === 0 || paragraphs[index - 1].sessionId !== item.sessionId || paragraphs[index - 1].direction !== item.direction) && <div className="session-divider">
             <strong>{DIRECTIONS[item.direction].sourceLabel} → {DIRECTIONS[item.direction].targetLabel}</strong>
@@ -262,6 +263,6 @@ export default function App() {
       <div><span>累計估算費用（台幣）</span><strong>{formatTwd(usdToTwd(usage.estimatedUsd, displayRate))}</strong>
         <small>US$1 ≈ NT${displayRate.toLocaleString('zh-TW', {maximumFractionDigits:4})}</small></div>
     </section>
-    <footer>版本 2.3.1 · 重新整理會清除字幕及累計用量，請先下載。費用與預算停止皆為估算，實際以帳單為準。</footer>
+    <footer>版本 2.3.2 · 重新整理會清除字幕及累計用量，請先下載。費用與預算停止皆為估算，實際以帳單為準。</footer>
   </main>;
 }
