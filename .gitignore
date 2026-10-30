@@ -1,5 +1,19 @@
+<<<<<<< Updated upstream
 .pnpm-store/
 **/node_modules/
 **/.env
 **/.env.*
 !**/.env.example
+=======
+# Local package downloads and installed dependencies are not project source.
+node_modules/
+.pnpm-store/
+
+# Keep personal API keys out of GitHub; example settings may be committed.
+.env
+.env.*
+!.env.example
+
+# Local recovery copies survive branch changes and are never uploaded.
+.local-backups/
+>>>>>>> Stashed changes
