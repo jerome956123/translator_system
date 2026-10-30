@@ -25,6 +25,56 @@ function harness(budgetUsd?: number, context?: string, pair?: LanguagePair) {
 afterEach(() => vi.useRealTimers());
 
 describe('純前端場次生命週期', () => {
+  it('連線準備時保留開頭；暫存、傳送與用量不重複計算，也不多開翻譯請求', async () => {
+    const h = harness(); let connect!: () => void;
+    h.stt.connect.mockImplementationOnce(() => new Promise<void>(resolve => { connect=resolve; }));
+    const opening = h.session.start(); await Promise.resolve(); await Promise.resolve();
+    h.audio(new Int16Array([1,-1,0]).buffer); h.audio(new Int16Array([2,-2,0]).buffer);
+    expect(h.stt.sendAudio).not.toHaveBeenCalled();
+    expect(h.session.snapshotAudio()!.durationSeconds).toBe(6/16000);
+    connect(); await opening;
+    expect(h.stt.sendAudio).toHaveBeenCalledTimes(2);
+    const clip=h.session.snapshotAudio()!;
+    expect(Array.from(new Int16Array(clip.wav.slice(44)))).toEqual([1,-1,0,2,-2,0]);
+    expect(h.translate).not.toHaveBeenCalled(); expect(h.capture.start).toHaveBeenCalledOnce();
+    h.session.dispose();
+  });
+
+  it('擷取原音不呼叫 AI、不停收音，正常停止後仍能回放尾音', async () => {
+    vi.useFakeTimers(); const h=harness(); await h.session.start();
+    h.audio(new Int16Array(1600).fill(12).buffer);
+    h.callbacks.onFinal('測試句子。'); await vi.advanceTimersByTimeAsync(10);
+    const requests=h.translate.mock.calls.length;
+    h.session.snapshotAudio(); h.session.snapshotAudio();
+    expect(h.translate).toHaveBeenCalledTimes(requests); expect(h.capture.stop).not.toHaveBeenCalled();
+    h.capture.stop.mockImplementationOnce(async () => { h.audio(new Int16Array([34]).buffer); });
+    const stopping=h.session.stop(); await vi.advanceTimersByTimeAsync(1600); await stopping;
+    const clip=h.session.snapshotAudio()!;
+    expect(clip.durationSeconds).toBe(1601/16000);
+    expect(new DataView(clip.wav).getInt16(clip.wav.byteLength-2,true)).toBe(34);
+    expect(h.stt.connect).toHaveBeenCalledOnce();
+  });
+
+  it('等待連線時取消，不能重開收音或保留無限啟動佇列', async () => {
+    const h=harness(); let reject!: (error:Error) => void;
+    h.stt.connect.mockImplementationOnce(() => new Promise<void>((_resolve,no) => {reject=no;}));
+    h.stt.close.mockImplementation(() => reject(new DOMException('停止','AbortError')));
+    const opening=h.session.start(); await Promise.resolve(); await Promise.resolve();
+    h.audio(new Int16Array([9]).buffer); await h.session.stop(); await opening;
+    expect(h.events.some(event=>event.type==='status'&&event.status==='listening')).toBe(false);
+    expect(h.stt.sendAudio).not.toHaveBeenCalled();
+  });
+
+  it('過長的啟動暫存會明確停止，診斷音訊仍限於最近 30 秒', async () => {
+    const h=harness(); let reject!: (error:Error) => void;
+    h.stt.connect.mockImplementationOnce(() => new Promise<void>((_resolve,no)=>{reject=no;}));
+    h.stt.close.mockImplementation(()=>reject(new DOMException('停止','AbortError')));
+    const opening=h.session.start(); await Promise.resolve(); await Promise.resolve();
+    h.audio(new Int16Array(16000*31).buffer); await opening;
+    expect(h.events.some(event=>event.type==='error'&&event.message.includes('準備太久'))).toBe(true);
+    expect(h.session.snapshotAudio()!.durationSeconds).toBe(30);
+  });
+
   it('等待第一包音訊時不宣稱聆聽中，收音啟動失敗會釋放連線', async () => {
     const h = harness(); let rejectCapture!: (error: Error) => void;
     h.capture.start.mockImplementation(() => new Promise((_resolve, reject) => { rejectCapture = reject; }));

@@ -53,10 +53,10 @@ describe('瀏覽器直連語音協定', () => {
     expect(setup.setup.generationConfig.responseModalities).toEqual(['TEXT']);
     expect(setup.setup.inputAudioTranscription.languageCodes).toEqual(['ja-JP']);
     expect(setup.setup.model).toBe('models/gemini-3.5-transcribe-live');
-    expect(setup.setup.inputAudioTranscription.mode).toBe('SMART');
+    expect(setup.setup.inputAudioTranscription.mode).toBe('VERBATIM');
     expect(setup.setup.inputAudioTranscription.customVocabulary).toEqual(['中央大学', '双聯学位']);
     expect(setup.setup.realtimeInputConfig.automaticActivityDetection).toEqual({
-      disabled: false, prefixPaddingMs: 100, silenceDurationMs: 800,
+      disabled: false, startOfSpeechSensitivity:'START_SENSITIVITY_HIGH',prefixPaddingMs:20,silenceDurationMs:800,
     });
     expect(stt.sendAudio(new ArrayBuffer(2))).toBe(false);
     socket.onmessage?.({ data: JSON.stringify({ setupComplete: {} }) }); await connected;

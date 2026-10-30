@@ -6,7 +6,7 @@
 
 1. 開啟 GitHub repository，進入原本存放 `index.html` 的發佈資料夾。
 2. 選 **Add file → Upload files**，拖入這次修改後、資料夾最外層的 `index.html`，按 **Commit changes** 儲存。
-3. 等待 Pages 更新，用原本的 HTTPS 網站首頁網址開啟。頁尾應顯示「版本 2.3.2」，沒有就重新整理。
+3. 等待 Pages 更新，用原本的 HTTPS 網站首頁網址開啟。頁尾應顯示「版本 2.4.0」，沒有就重新整理。
 4. 在手機 Safari／Chrome 中貼上 Gemini API Key，按開始並允許麥克風。下次使用同一個瀏覽器會自動帶入。
 
 這個檔案包含所需程式與樣式，不需同時上傳 `realtime-text`、`node_modules` 或 `.env`。注意：`realtime-text` 裡面的 `index.html` 是原始碼入口，請上傳最外層的成品。
@@ -20,6 +20,8 @@
 已附 `.github/workflows/realtime-pages.yml`。上傳整個專案後，在 Pages 選 **GitHub Actions**，再到 Actions 選 **Deploy realtime subtitles to GitHub Pages → Run workflow**。不需要填 Gemini secret；使用者在發佈後的頁面自行輸入 Key。這個方式會將新版作為 Pages 首頁。
 
 ## 使用時
+
+新增「漏字檢查」：可擷取最近 30 秒原音，停止後回放；可勾選辨識稿對照並下載對照 TXT。擷取與播放不增加 AI 呼叫。重新整理會清除未下載的原音與字幕。
 
 手機不需安裝 Node.js，筆電也不必一直開著。手機請保持頁面在前景；鎖屏或切 App 會停止收音，電腦可切到影音分頁。API Key 會保存在同一個瀏覽器，按「清除」可刪掉。重新整理會清除字幕，需要留存請先下載 TXT。
 

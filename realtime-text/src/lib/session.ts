@@ -1,5 +1,6 @@
 import { DIRECTIONS, type Direction, type Language, type ServerMessage } from '../../shared/protocol';
 import { AudioCapture, pcmLevel } from '../audio/capture';
+import { RecentAudio } from '../audio/recent-audio';
 import { readableError } from './config';
 import { GeminiBrowserSTT, type STTConnection } from './stt';
 import { TranslationScheduler } from './scheduler';
@@ -32,6 +33,9 @@ export class BrowserTranslationSession {
   private disposed = false;
   private ready = false;
   private started = false;
+  private startupAudio: ArrayBuffer[] = [];
+  private startupBytes = 0;
+  private recentAudio = new RecentAudio();
   private finishing?: Promise<void>;
   private lastUsage = 0;
   private lastLevelAt = -Infinity;
@@ -142,20 +146,28 @@ export class BrowserTranslationSession {
     if (this.disposed || this.stopping || this.started) return;
     this.started = true;
     this.status('connecting', this.settings.audioSource === 'display'
-      ? '請選擇播放中的分頁，並勾選「分享分頁音訊」。只會傳送音訊，不會傳送畫面。'
-      : '請允許麥克風，會收取你說話與喇叭外放的聲音。');
+      ? '請選擇播放中的分頁，並勾選分享音訊；正在準備持續聆聽…'
+      : '正在準備麥克風與 AI 連線，請稍候顯示「持續聆聽中」再說話。');
     try {
       // 先解鎖音訊處理，再等待網路；符合手機瀏覽器的使用者手勢要求。
       await this.capture.prepare();
       if (this.stopping || this.disposed) return;
-      await this.stt.connect(this.settings.apiKey, this.settings.pair ? [] : DIRECTIONS[this.settings.direction].source, this.settings.customVocabulary);
+      // Preserve audio captured while model setup is pending (the v2.3.3 fix).
+      const connection = this.stt.connect(this.settings.apiKey, this.settings.pair ? [] : DIRECTIONS[this.settings.direction].source, this.settings.customVocabulary);
+      const capture = this.capture.start(chunk => this.audio(chunk), message => { if (!this.stopping) this.fail(message); });
+      await Promise.all([connection, capture]);
       if (this.stopping || this.disposed) return;
       this.ready = true;
       this.lastTranscriptAt = Date.now();
-      await this.capture.start(chunk => this.audio(chunk), message => { if (!this.stopping) this.fail(message); });
+      const buffered = this.startupAudio;
+      this.startupAudio = []; this.startupBytes = 0;
+      for (const chunk of buffered) {
+        if (this.stopping || this.disposed) break;
+        this.sendAudio(chunk);
+      }
       if (!this.stopping && !this.disposed) this.status('listening', this.settings.audioSource === 'display'
-        ? '分享音訊已開始傳送，等待辨識文字。'
-        : '麥克風已開始收音，可以說話或播放喇叭音訊。');
+        ? '持續聆聽分享音訊中。停頓時也保持連線，按停止才結束。'
+        : '持續聆聽中，可以說話。停頓時麥克風與 AI 連線仍保持開啟。');
     } catch (error) {
       if (!this.stopping && !this.disposed) {
         const hint = error instanceof DOMException && error.name === 'NotAllowedError'
@@ -168,7 +180,25 @@ export class BrowserTranslationSession {
   }
 
   private audio(chunk: ArrayBuffer) {
-    if (!this.ready || this.disposed) return;
+    if (this.disposed) return;
+    this.recentAudio.append(chunk);
+    if (!this.ready) {
+      if (this.stopping) return;
+      if (this.startupBytes + chunk.byteLength > 16000 * 2 * 20) {
+        this.fail('語音連線準備太久，已停止收音。請檢查網路後重新開始。');
+        return;
+      }
+      this.startupAudio.push(chunk); this.startupBytes += chunk.byteLength;
+      return;
+    }
+    this.sendAudio(chunk);
+  }
+
+  get recentAudioSeconds() { return this.recentAudio.durationSeconds; }
+  snapshotAudio() { return this.recentAudio.snapshot(); }
+
+  private sendAudio(chunk: ArrayBuffer) {
+    if (this.disposed) return;
     try {
       if (this.stt.sendAudio(chunk)) {
         this.usage.addAudioBytes(chunk.byteLength);
@@ -276,6 +306,7 @@ export class BrowserTranslationSession {
     this.disposed = true;
     this.stopping = true;
     this.ready = false;
+    this.startupAudio = []; this.startupBytes = 0;
     clearTimeout(this.finishTimer);
     this.finalArrived?.();
     this.finalArrived = undefined;

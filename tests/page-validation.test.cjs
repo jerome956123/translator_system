@@ -9,6 +9,12 @@ test('the current uploadable page and microphone code pass validation', () => {
     assert.equal(validatePage(html).worklet, true);
 });
 
+test('worklet string validation accepts escaped Windows line endings from a fresh build', () => {
+    const worklet = "class Pcm16Resampler extends AudioWorkletProcessor {}\r\nregisterProcessor('pcm16-resampler', Pcm16Resampler);";
+    const page = '<div id="root"></div><script>const audio=' + JSON.stringify(worklet) + ';</script>';
+    assert.equal(validatePage(page).worklet, true);
+});
+
 test('merge markers are rejected even when hidden inside a valid JavaScript string', () => {
     const conflict = ['<'.repeat(7) + ' Updated upstream', 'old', '='.repeat(7), 'new', '>'.repeat(7) + ' Stashed changes'].join('\n');
     const broken = html.replace('class Pcm16Resampler', conflict + '\nclass Pcm16Resampler');

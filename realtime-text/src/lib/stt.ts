@@ -36,12 +36,12 @@ export class GeminiBrowserSTT implements STTConnection {
         socket.send(JSON.stringify({ setup: {
           model: `models/${MODELS.stt}`, generationConfig: { responseModalities: ['TEXT'] },
           inputAudioTranscription: {
-            languageCodes: Array.isArray(language) ? language : [language], mode: 'SMART',
+            languageCodes: Array.isArray(language) ? language : [language], mode: 'VERBATIM',
             ...(customVocabulary.length ? { customVocabulary } : {}),
           },
           // 保留短停頓中的同一句；草稿仍持續輸出，不必等到停頓結束。
           realtimeInputConfig: { automaticActivityDetection: {
-            disabled: false, prefixPaddingMs: 100, silenceDurationMs: 800,
+            disabled: false, startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH', prefixPaddingMs: 20, silenceDurationMs: 800,
           } },
         } }));
       };

@@ -10,6 +10,7 @@ import { stopWhenHidden } from './lib/page-visibility';
 import { sourceLang, targetLang } from './lib/chinese';
 import { defaultDirection } from './lib/languages';
 import { EXCHANGE_RATE_DATE, EXCHANGE_RATE_SOURCE, formatTwd, twdBudgetToUsd, usdToTwd, validExchangeRate } from './lib/currency';
+import { recognitionText, exportComparison, audioTime } from './lib/diagnostics';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped' | 'error';
 const LABEL: Record<Status, string> = {
@@ -17,15 +18,15 @@ const LABEL: Record<Status, string> = {
   finishing: '處理最後一句', stopped: '已停止', error: '需要處理',
 };
 
-function FlowingCaption({ captions, field }: { captions: Caption[]; field: 'original' | 'translation' }) {
+function FlowingCaption({ captions, field }: { captions: Caption[]; field: 'original' | 'translation' | 'recognition' }) {
   let previous = '';
   return captions.map(caption => {
-    const text = inlineText(caption[field]);
+    const text = inlineText(field === 'recognition' ? recognitionText(caption) : caption[field]);
     if (!text) return null;
     const joined = joinSpeech(previous, text);
     const addition = joined.slice(previous.length);
     previous = joined;
-    const final = field === 'original' ? caption.originalFinal : caption.translationFinal;
+    const final = field === 'translation' ? caption.translationFinal : caption.originalFinal;
     return <span className={final ? '' : 'live-fragment'} key={caption.id}>{addition}</span>;
   });
 }
@@ -45,6 +46,12 @@ export default function App() {
   const [exchangeRate, setExchangeRate] = useState(() => String(loadExchangeRate()));
   const [sessionExchangeRate, setSessionExchangeRate] = useState(() => loadExchangeRate());
   const [showOriginal, setShowOriginal] = useState(true);
+  const [showComparison, setShowComparison] = useState(false);
+  const [recentAudioSeconds, setRecentAudioSeconds] = useState(0);
+  const [audioClip, setAudioClip] = useState<{
+    url: string; durationSeconds: number; startSeconds: number; endSeconds: number;
+    sessionId: string; pairLabel: string; filename: string;
+  } | null>(null);
   const [status, setStatus] = useState<Status>('idle');
   const [message, setMessage] = useState(() => apiKey.trim()
     ? '已帶入記住的 API Key，按開始即可持續聆聽。' : '填入自己的 API Key，按開始即可持續聆聽。');
@@ -52,6 +59,7 @@ export default function App() {
   const [{ total: usage }, dispatchUsage] = useReducer(usageHistory, INITIAL_USAGE_HISTORY);
   const [elapsed, setElapsed] = useState(0);
   const session = useRef<BrowserTranslationSession | null>(null);
+  const sessionPair = useRef<LanguagePair>(pair);
   const statusRef = useRef<Status>('idle');
   const startedAt = useRef(0);
   const captionPane = useRef<HTMLDivElement>(null);
@@ -75,6 +83,7 @@ export default function App() {
   function receive(event: ServerMessage) {
     if (event.sessionId !== session.current?.id) return;
     if (event.type === 'status') {
+      setRecentAudioSeconds(session.current?.recentAudioSeconds ?? 0);
       changeStatus(event.status);
       if (event.status === 'listening' && !startedAt.current) startedAt.current = Date.now();
       setMessage(event.message ?? LABEL[event.status]);
@@ -82,10 +91,13 @@ export default function App() {
       if (event.status === 'listening' && document.hidden && stopWhenHidden(navigator))
         void session.current?.stop('手機頁面已切到背景，已停止收音；請返回此頁重新開始。');
     } else if (event.type === 'error') {
+      setRecentAudioSeconds(session.current?.recentAudioSeconds ?? 0);
       changeStatus('error'); setMessage(event.message);
       void wakeLock.current?.release().catch(() => {});
     } else if (event.type === 'warning') setMessage(event.message);
-    else if (event.type === 'audio-level') setAudioLevel(event.level);
+    else if (event.type === 'audio-level') {
+      setAudioLevel(event.level); setRecentAudioSeconds(session.current?.recentAudioSeconds ?? 0);
+    }
     else if (event.type === 'usage') dispatchUsage(event);
     else dispatchCaptions({ type: 'message', event, direction });
   }
@@ -99,7 +111,7 @@ export default function App() {
     catch (error) { setMessage(error instanceof Error ? error.message : '請檢查預算與匯率。'); return; }
     session.current?.dispose();
     changeStatus('connecting');
-    dispatchCaptions({ type: 'start-session' }); setElapsed(0); setAudioLevel(null);
+    dispatchCaptions({ type: 'start-session' }); setElapsed(0); setAudioLevel(null); setRecentAudioSeconds(0);
     setKeyExpanded(false);
     setSessionExchangeRate(rate);
     startedAt.current = 0; followBottom.current = true;
@@ -107,6 +119,7 @@ export default function App() {
       customVocabulary: parseVocabulary(vocabulary), context: captions.slice(-4)
         .map(item => `${DIRECTIONS[item.direction].sourceLabel}: ${item.original}`).join('\n').slice(-512) }, receive);
     session.current = next;
+    sessionPair.current = pair;
     dispatchUsage({ type: 'start-session', sessionId: next.id });
     if (navigator.wakeLock) void navigator.wakeLock.request('screen').then(lock => {
       if (session.current !== next || !['connecting', 'ready', 'listening'].includes(statusRef.current)) void lock.release();
@@ -148,16 +161,38 @@ export default function App() {
     if (pane && followBottom.current) pane.scrollTop = pane.scrollHeight;
   }, [captions]);
 
+  // Replacing/clearing a clip releases its URL, including on unmount. Nothing goes to storage.
+  useEffect(() => () => { if (audioClip) URL.revokeObjectURL(audioClip.url); }, [audioClip]);
+
   const paragraphs = useMemo(() => groupCaptions(captions), [captions]);
   const textOutput = useMemo(() => exportParagraphs(paragraphs, showOriginal), [paragraphs, showOriginal]);
+  const comparisonOutput = useMemo(() => exportComparison(captions), [captions]);
   const hasUsage = usage.audioSeconds > 0 || usage.translationRequests > 0 || usage.estimatedUsd > 0;
 
   function clearHistory() {
     session.current?.dispose(); session.current = null;
     dispatchCaptions({ type: 'clear-history' });
     dispatchUsage({ type: 'clear-history' });
-    startedAt.current = 0; setElapsed(0); setAudioLevel(null);
+    startedAt.current = 0; setElapsed(0); setAudioLevel(null); setRecentAudioSeconds(0); setAudioClip(null);
     setMessage('已清除字幕紀錄與累計用量、費用。');
+  }
+
+  function keepRecentAudio() {
+    const current = session.current;
+    const clip = current?.snapshotAudio();
+    if (!current || !clip) { setMessage('目前還沒有可回放的音訊，請先開始聆聽。'); return; }
+    setAudioClip({ url: URL.createObjectURL(new Blob([clip.wav], {type:'audio/wav'})),
+      durationSeconds: clip.durationSeconds, startSeconds: clip.startSeconds, endSeconds: clip.endSeconds,
+      sessionId: current.id, pairLabel: LANGUAGE_PAIRS[sessionPair.current].label,
+      filename: `原音片段_${new Date().toISOString().replace(/[:.]/g, '-')}.wav` });
+  }
+
+  function downloadComparison() {
+    const url = URL.createObjectURL(new Blob(['\uFEFF', comparisonOutput], {type:'text/plain;charset=utf-8'}));
+    const link = document.createElement('a'); link.href = url;
+    link.download = `辨識稿對照_${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
 
   function download() {
@@ -187,7 +222,7 @@ export default function App() {
         autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="貼上一次，下次自動帶入" onChange={event => updateApiKey(event.target.value)} />
         <button type="button" onClick={() => setShowKey(value => !value)} aria-label={showKey ? '隱藏金鑰' : '顯示金鑰'}>{showKey ? '隱藏' : '顯示'}</button>
         <button type="button" disabled={running || !apiKey} title="刪除此瀏覽器記住的 API Key"
-          onClick={() => { updateApiKey(''); session.current?.dispose(); session.current = null; }}>清除</button>
+          onClick={() => { updateApiKey(''); session.current?.dispose(); session.current = null; setRecentAudioSeconds(0); }}>清除</button>
       </div>
       <p role="status">{!storageAvailable ? '瀏覽器暫時無法更新儲存的金鑰。重新開啟後請確認輸入內容，本次仍可使用。'
         : apiKey.trim() ? '已在此瀏覽器記住金鑰，下次開啟會自動帶入。按「清除」即可刪除。'
@@ -233,6 +268,26 @@ export default function App() {
       {running && <span className="audio-signal"><meter min={0} max={1} value={Math.min(1, (audioLevel ?? 0) * 8)} aria-label="輸入音量" />
         {audioLevel === null ? '等待音訊' : audioLevel >= 0.008 ? '收到聲音' : '音量低／安靜'}</span>}
       <time>{time}</time></section>
+    <details className="diagnostics-panel">
+      <summary>漏字檢查（原音與辨識稿）</summary>
+      <p>只在此頁記憶體保留最近 30 秒原音，不增加 AI 呼叫或費用。聽到漏字時先擷取，停止聆聽後再播放。</p>
+      <div className="diagnostic-actions">
+        <button disabled={!recentAudioSeconds} onClick={keepRecentAudio}>擷取最近30秒</button>
+        <span>目前可擷取 {recentAudioSeconds.toFixed(1)} 秒</span>
+        <button disabled={!comparisonOutput} onClick={downloadComparison}>下載對照文字</button>
+      </div>
+      {audioClip && <div className="saved-audio">
+        <span>已保留 {audioClip.durationSeconds.toFixed(1)} 秒 · {audioClip.pairLabel} · 收音位置 {audioTime(audioClip.startSeconds)}–{audioTime(audioClip.endSeconds)}</span>
+        {running ? <p>已保留片段。停止聆聽後即可播放，避免播放聲音再次被翻譯。</p>
+          : <audio controls preload="metadata" src={audioClip.url} aria-label="保留的原音片段" />}
+        <div className="diagnostic-actions">
+          <a href={audioClip.url} download={audioClip.filename}>下載原音 WAV</a>
+          <button onClick={() => setAudioClip(null)}>清除保留片段</button>
+        </div>
+      </div>}
+      <label className="switch"><input type="checkbox" checked={showComparison} onChange={event => setShowComparison(event.target.checked)} />在字幕中顯示辨識稿對照</label>
+      <p>辨識稿只統一繁體字形，不經文字模型校正；對照包含目前字幕紀錄，不會與原音逐句自動對齊。未擷取的聲音會循環覆蓋，保留片段在重新整理或清除紀錄後消失。</p>
+    </details>
     <section className="workspace">
       <div className="section-title"><h2>字幕紀錄</h2>
         <label className="switch"><input type="checkbox" checked={showOriginal} onChange={event => setShowOriginal(event.target.checked)} />顯示原文</label></div>
@@ -245,7 +300,11 @@ export default function App() {
             <strong>{DIRECTIONS[item.direction].sourceLabel} → {DIRECTIONS[item.direction].targetLabel}</strong>
             <time>{new Date(item.receivedAt).toLocaleTimeString('zh-TW', {hour:'2-digit', minute:'2-digit'})}</time></div>}
           <article className="caption">
-          {showOriginal && <p className="original" lang={sourceLang(item.direction)}><small>{item.originalFinal ? 'AI 原文' : 'AI 原文 · 草稿'}{item.corrected ? ' · 已依上下文校正' : ''}
+          {showComparison && <div className="comparison-grid">
+            <div><small>語音辨識稿 · 文字校正前</small><p lang={sourceLang(item.direction)}><FlowingCaption captions={item.captions} field="recognition" /></p></div>
+            <div><small>目前原文 · 含可能的校正</small><p lang={sourceLang(item.direction)}><FlowingCaption captions={item.captions} field="original" /></p></div>
+          </div>}
+          {showOriginal && !showComparison && <p className="original" lang={sourceLang(item.direction)}><small>{item.originalFinal ? 'AI 原文' : 'AI 原文 · 草稿'}{item.corrected ? ' · 已依上下文校正' : ''}
             </small><FlowingCaption captions={item.captions} field="original" /></p>}
           <p className="translation" lang={targetLang(item.direction)}><small>{item.translationFinal ? '譯文' : running && item.sessionId === session.current?.id ? '譯文 · 更新中' : '譯文 · 含未完成草稿'}</small>
             {item.translation ? <FlowingCaption captions={item.captions} field="translation" /> : '等待翻譯…'}</p>
@@ -254,7 +313,7 @@ export default function App() {
       <div className="export-actions"><button disabled={!textOutput} onClick={() => void navigator.clipboard.writeText(textOutput)
         .then(() => setMessage('字幕已複製。')).catch(() => setMessage('瀏覽器無法複製，請使用下載 TXT。'))}>複製文字</button>
         <button disabled={!textOutput} onClick={download}>下載 TXT</button>
-        <button disabled={(!captions.length && !hasUsage) || running} title="清除字幕與累計用量、費用" onClick={clearHistory}>清除紀錄</button></div>
+        <button disabled={(!captions.length && !hasUsage && !recentAudioSeconds && !audioClip) || running} title="清除字幕、原音與累計用量、費用" onClick={clearHistory}>清除紀錄</button></div>
     </section>
     <section className="usage-grid" aria-label="清除紀錄前的累計用量與費用">
       <div><span>累計音訊</span><strong>{usage.audioSeconds.toFixed(1)} 秒</strong></div>
@@ -263,6 +322,6 @@ export default function App() {
       <div><span>累計估算費用（台幣）</span><strong>{formatTwd(usdToTwd(usage.estimatedUsd, displayRate))}</strong>
         <small>US$1 ≈ NT${displayRate.toLocaleString('zh-TW', {maximumFractionDigits:4})}</small></div>
     </section>
-    <footer>版本 2.3.2 · 重新整理會清除字幕及累計用量，請先下載。費用與預算停止皆為估算，實際以帳單為準。</footer>
+    <footer>版本 2.4.0 · 原音回放與辨識稿對照 · 重新整理會清除字幕、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
   </main>;
 }

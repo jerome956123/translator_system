@@ -20,9 +20,23 @@ function validatePage(html) {
         catch (error) { throw new Error(`首頁第 ${index + 1} 段程式語法錯誤：${error.message}`); }
     }
     const code = scripts.map(script => script[1]).join('\n');
-    const worklet = code.match(/`(class Pcm16Resampler[\s\S]*?registerProcessor\('pcm16-resampler',[^\n]*\);\s*)`/);
-    if (!worklet) throw new Error('找不到持續收音程式，請檢查完整首頁。');
-    try { new vm.Script(worklet[1]); }
+    const start = code.indexOf('class Pcm16Resampler');
+    const quote = code[start - 1];
+    if (start < 0 || !['"', "'", '`'].includes(quote)) throw new Error('找不到持續收音程式，請檢查完整首頁。');
+    let end = start;
+    for (; end < code.length; end++) {
+        if (code[end] === '\\') { end++; continue; }
+        if (code[end] === quote) break;
+        if (quote === '`' && code[end] === '$' && code[end + 1] === '{')
+            throw new Error('收音程式不能包含動態字串運算。');
+    }
+    if (end >= code.length) throw new Error('收音程式字串未完整結束。');
+    // Decode only a bounded string literal, never execute application code.
+    const worklet = new vm.Script('(' + code.slice(start - 1, end + 1) + ')')
+        .runInNewContext(Object.create(null), {timeout:100});
+    if (typeof worklet !== 'string' || !worklet.includes("registerProcessor('pcm16-resampler',"))
+        throw new Error('持續收音程式未完成註冊。');
+    try { new vm.Script(worklet); }
     catch (error) { throw new Error(`持續收音程式語法錯誤：${error.message}`); }
     return { scripts: scripts.length, worklet: true };
 }

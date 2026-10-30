@@ -91,6 +91,17 @@ button.stop { color: #ffbbc2; background: #31141c; border-color: #63303b; }
 .usage-grid strong { font-size: 16px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .usage-grid small { display: block; margin-top: 3px; font-size: 11px; color: #8097b2; }
 .cost-settings input { max-width: 240px; }
+.diagnostics-panel { padding: 0 12px; border: 1px solid #29435b; border-radius: 10px; color: #98aac0; font-size: 12px; background: #0c1727; }
+.diagnostics-panel summary { cursor: pointer; min-height: 32px; padding: 7px 0; color: #b7c9df; }
+.diagnostics-panel p { margin: 4px 0 10px; line-height: 1.7; }
+.diagnostic-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; }
+.diagnostic-actions button, .diagnostic-actions a { min-height: 36px; font-size: 12px; padding: 7px 10px; }
+.saved-audio { padding: 10px 12px 0; margin-bottom: 10px; border: 1px solid #29435b; border-radius: 8px; }
+.saved-audio > span { display: block; margin-bottom: 8px; }
+.saved-audio audio { display: block; width: 100%; max-width: 600px; margin: 8px 0; height: 40px; }
+.comparison-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 0 0 12px; margin-bottom: 12px; border-bottom: 1px solid #304159; }
+.comparison-grid > div { min-width: 0; }
+.comparison-grid p { white-space: pre-wrap; }
 footer { color: #60748c; text-align: center; font-size: 10px; line-height: 1.5; padding: 2px 4px; }
 @media (pointer: fine) {
   button { min-height: 38px; }
@@ -100,6 +111,8 @@ footer { color: #60748c; text-align: center; font-size: 10px; line-height: 1.5; 
   .main-actions { grid-column: 1 / -1; justify-content: flex-end; }
 }
 @media (max-width: 600px) {
+  .comparison-grid { grid-template-columns: 1fr; }
+  .diagnostic-actions button, .diagnostic-actions a { min-height: 44px; }
   button, .key-summary button, .export-actions button { min-height: 44px; }
   .session-active .key-panel, .session-active .settings-row, .session-active .source-hint, .session-active .control-panel > label { display: none; }
   .session-active .control-panel { position: sticky; top: 6px; z-index: 2; padding: 10px; }

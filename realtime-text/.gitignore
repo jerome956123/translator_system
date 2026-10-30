@@ -1,5 +1,5 @@
 node_modules/
-dist/
+# Keep the packaged frontend with its referenced assets in this existing repository.
 dist-server/
 .env
 *.log

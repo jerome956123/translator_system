@@ -1,10 +1,12 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import pageChecks from '../../scripts/check-page.cjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dist = resolve(root, 'dist');
-let html = await readFile(resolve(dist, 'index.html'), 'utf8');
+const entry = (await readFile(resolve(dist, 'index.html'), 'utf8')).replace(/\r\n?/g, '\n');
+let html = entry;
 const scripts = [...html.matchAll(/<script\b[^>]*src="([^"]+)"[^>]*><\/script>/g)];
 for (const match of scripts) {
   const js = await readFile(resolve(dist, match[1]), 'utf8');
@@ -19,6 +21,10 @@ if (/src="[^" ]+\.js"|href="[^" ]+\.css"/.test(html)) throw new Error('單檔打
 const notices = await Promise.all(['LICENSE', 'THIRD_PARTY_LICENSES.md', 'LICENSES/Apache-2.0.txt']
   .map(file => readFile(resolve(root, 'node_modules/opencc-js', file), 'utf8')));
 html = html.replace('</head>', `<!-- opencc-js and dictionary licenses\n${notices.join('\n').replace(/--/g, '- -')}\n-->\n</head>`);
+html = html.replace(/\r\n?/g, '\n');
+pageChecks.validatePage(html);
+pageChecks.assertNoConflicts(await readFile(resolve(root, '..', '.gitignore'), 'utf8'), '.gitignore');
+await writeFile(resolve(dist, 'index.html'), entry);
 await writeFile(resolve(dist, 'standalone.html'), html);
 await writeFile(resolve(root, '..', 'index.html'), html);
 console.log('已產生純前端網站 dist/，以及可直接更新 GitHub Pages 首頁的 index.html。');
