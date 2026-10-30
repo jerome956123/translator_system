@@ -55,6 +55,7 @@ export interface SessionSettings {
   budgetUsd?: number;
   customVocabulary?: string[];
   context?: string;
+  precisionReview?: boolean;
 }
 
 export interface Caption {

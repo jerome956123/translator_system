@@ -6,7 +6,7 @@ import { defaultDirection } from '../src/lib/languages';
 import { twdBudgetToUsd, usdToTwd } from '../src/lib/currency';
 import type { Caption } from '../src/lib/types';
 
-function harness(budgetUsd?: number, context?: string, pair?: LanguagePair) {
+function harness(budgetUsd?: number, context?: string, pair?: LanguagePair, precisionReview = false) {
   const events: ServerMessage[] = [];
   let audio!: (data: ArrayBuffer) => void;
   let callbacks!: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onError: (text: string) => void };
@@ -17,14 +17,53 @@ function harness(budgetUsd?: number, context?: string, pair?: LanguagePair) {
     options.onUsage('完整提示與前文', '訳文', 10, 2);
     options.onChunk('訳文'); return { text: '訳文' };
   });
-  const session = new BrowserTranslationSession({ apiKey: 'fake-key', direction: pair ? defaultDirection(pair) : 'zh-ja', pair, mode: 'saving', budgetUsd, context }, event => events.push(event), {
-    capture, createSTT: next => { callbacks = next; return stt; }, translate,
+  const reviewAudio = vi.fn(async options => {
+    const estimate = { inputTokens: 2000, audioTokens: 416, outputTokens: 2048, estimated: true };
+    if (!options.beforeRequest(estimate)) throw new Error('本場剩餘預算不足');
+    options.onUsage(estimate);
+    options.onUsage({ inputTokens: 516, audioTokens: 416, outputTokens: 20, estimated: false });
+    return [{ direction: 'zh-ja' as const, original: '停頓之後的小聲新句子', translation: '小さな声' }];
   });
-  return { session, events, capture, stt, translate, get callbacks() { return callbacks; }, audio: (data: ArrayBuffer) => audio(data), captureError: (message: string) => captureError?.(message) };
+  const session = new BrowserTranslationSession({ apiKey: 'fake-key', direction: pair ? defaultDirection(pair) : 'zh-ja', pair, mode: 'saving', budgetUsd, context, precisionReview }, event => events.push(event), {
+    capture, createSTT: next => { callbacks = next; return stt; }, translate, reviewAudio,
+  });
+  return { session, events, capture, stt, translate, reviewAudio, get callbacks() { return callbacks; }, audio: (data: ArrayBuffer) => audio(data), captureError: (message: string) => captureError?.(message) };
 }
 afterEach(() => vi.useRealTimers());
 
 describe('純前端場次生命週期', () => {
+  it('回聽關閉時長停頓與新句開頭仍持續送音，沒有額外 AI 請求', async () => {
+    const h = harness(); await h.session.start();
+    h.audio(new Int16Array(16000).fill(300).buffer); h.audio(new Int16Array(16000 * 20).buffer);
+    h.audio(new Int16Array(16000).fill(4).buffer);
+    expect(h.stt.sendAudio).toHaveBeenCalledTimes(3); expect(h.stt.connect).toHaveBeenCalledOnce();
+    expect(h.capture.start).toHaveBeenCalledOnce(); expect(h.reviewAudio).not.toHaveBeenCalled();
+    expect(h.translate).not.toHaveBeenCalled(); h.session.dispose();
+  });
+
+  it('即時原文完全沒回覆時，回聽仍可補出新內容，而且共用同一支麥克風', async () => {
+    const h = harness(undefined, undefined, 'zh-ja', true); await h.session.start();
+    h.audio(new Int16Array(16000 * 10).buffer); h.audio(new Int16Array(16000 * 3).fill(4).buffer);
+    await Promise.resolve(); await Promise.resolve();
+    expect(h.events.find(event => event.type === 'precision-result')).toMatchObject({ window: {
+      segments: [expect.objectContaining({ original: '停頓之後的小聲新句子' })],
+    } });
+    expect(h.events.some(event => event.type === 'transcript')).toBe(false);
+    expect(h.capture.start).toHaveBeenCalledOnce(); expect(h.stt.connect).toHaveBeenCalledOnce();
+    expect(h.events.filter(event => event.type === 'usage').at(-1)).toMatchObject({ usage: {
+      reviewRequests: 1, reviewAudioSeconds: 13, outputTokens: 20,
+    } });
+    h.session.dispose();
+  });
+
+  it('回聽預估費用超出剩餘預算時，不上傳額外原音，即時字幕持續', async () => {
+    const h = harness(.002, undefined, 'zh-ja', true); await h.session.start();
+    h.audio(new Int16Array(16000 * 13).buffer); await Promise.resolve(); await Promise.resolve();
+    expect(h.events.some(event => event.type === 'precision-status' && event.state === 'error')).toBe(true);
+    expect(h.events.some(event => event.type === 'error')).toBe(false);
+    expect(h.events.filter(event => event.type === 'usage').at(-1)).toMatchObject({ usage: { translationRequests: 0 } });
+    expect(h.capture.stop).not.toHaveBeenCalled(); h.session.dispose();
+  });
   it('連線準備時保留開頭；暫存、傳送與用量不重複計算，也不多開翻譯請求', async () => {
     const h = harness(); let connect!: () => void;
     h.stt.connect.mockImplementationOnce(() => new Promise<void>(resolve => { connect=resolve; }));

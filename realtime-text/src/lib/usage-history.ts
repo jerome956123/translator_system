@@ -36,5 +36,10 @@ export function usageHistory(state: UsageHistory, action: Action): UsageHistory 
     estimatedUsd: previous.estimatedUsd + current.estimatedUsd,
     isEstimate: previous.isEstimate || current.isEstimate,
     tokenEstimate: previous.tokenEstimate || current.tokenEstimate,
+    ...(previous.reviewRequests || current.reviewRequests ? {
+      reviewRequests: (previous.reviewRequests ?? 0) + (current.reviewRequests ?? 0),
+      reviewAudioSeconds: (previous.reviewAudioSeconds ?? 0) + (current.reviewAudioSeconds ?? 0),
+      reviewEstimatedUsd: (previous.reviewEstimatedUsd ?? 0) + (current.reviewEstimatedUsd ?? 0),
+    } : {}),
   } };
 }

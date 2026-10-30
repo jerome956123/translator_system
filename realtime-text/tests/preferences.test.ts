@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { API_KEY_STORAGE_KEY, loadApiKey, saveApiKey, parseVocabulary, loadExchangeRate, saveExchangeRate } from '../src/lib/preferences';
+import { API_KEY_STORAGE_KEY, loadApiKey, saveApiKey, parseVocabulary, loadExchangeRate, saveExchangeRate, loadPrecisionReview, savePrecisionReview } from '../src/lib/preferences';
 
 function memoryStorage() {
   const data = new Map<string, string>();
@@ -8,6 +8,13 @@ function memoryStorage() {
 }
 
 describe('個人瀏覽器記憶設定', () => {
+  it('回聽預設關閉，記住明確選擇，儲存被阻擋時安全回到關閉', () => {
+    const storage = memoryStorage(); expect(loadPrecisionReview(storage)).toBe(false);
+    expect(savePrecisionReview(true, storage)).toBe(true); expect(loadPrecisionReview(storage)).toBe(true);
+    savePrecisionReview(false, storage); expect(loadPrecisionReview(storage)).toBe(false);
+    const blocked = () => { throw new Error('blocked'); };
+    expect(loadPrecisionReview({ getItem: blocked, setItem: blocked, removeItem: blocked })).toBe(false);
+  });
   it('重新讀取時自動帶入已保存的 Key，清除後不再帶入', () => {
     const storage = memoryStorage();
     expect(loadApiKey(storage)).toBe('');

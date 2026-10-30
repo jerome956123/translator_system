@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useReducer, useRef, useState } from 'reac
 import { DIRECTIONS, LANGUAGE_PAIRS, type AudioSource, type LanguagePair, type Mode, type ServerMessage } from '../shared/protocol';
 import { BrowserTranslationSession } from './lib/session';
 import { exportParagraphs, groupCaptions, inlineText, joinSpeech } from './lib/paragraphs';
-import { loadApiKey, saveApiKey, loadVocabulary, saveVocabulary, parseVocabulary, loadExchangeRate, saveExchangeRate } from './lib/preferences';
+import { loadApiKey, saveApiKey, loadVocabulary, saveVocabulary, parseVocabulary, loadExchangeRate, saveExchangeRate, loadPrecisionReview, savePrecisionReview } from './lib/preferences';
 import type { Caption } from './lib/types';
 import { captionHistory } from './lib/history';
 import { INITIAL_USAGE_HISTORY, usageHistory } from './lib/usage-history';
@@ -11,6 +11,7 @@ import { sourceLang, targetLang } from './lib/chinese';
 import { defaultDirection } from './lib/languages';
 import { EXCHANGE_RATE_DATE, EXCHANGE_RATE_SOURCE, formatTwd, twdBudgetToUsd, usdToTwd, validExchangeRate } from './lib/currency';
 import { recognitionText, exportComparison, audioTime } from './lib/diagnostics';
+import { precisionHistory, exportPrecision } from './lib/precision-history';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped' | 'error';
 const LABEL: Record<Status, string> = {
@@ -47,6 +48,9 @@ export default function App() {
   const [sessionExchangeRate, setSessionExchangeRate] = useState(() => loadExchangeRate());
   const [showOriginal, setShowOriginal] = useState(true);
   const [showComparison, setShowComparison] = useState(false);
+  const [precisionReview, setPrecisionReview] = useState(() => loadPrecisionReview());
+  const [precisionWindows, dispatchPrecision] = useReducer(precisionHistory, []);
+  const [precisionStatus, setPrecisionStatus] = useState('尚未開啟本場回聽。');
   const [recentAudioSeconds, setRecentAudioSeconds] = useState(0);
   const [audioClip, setAudioClip] = useState<{
     url: string; durationSeconds: number; startSeconds: number; endSeconds: number;
@@ -64,6 +68,8 @@ export default function App() {
   const startedAt = useRef(0);
   const captionPane = useRef<HTMLDivElement>(null);
   const followBottom = useRef(true);
+  const precisionPane = useRef<HTMLDivElement>(null);
+  const followPrecisionBottom = useRef(true);
   const wakeLock = useRef<WakeLockSentinel | null>(null);
 
   const secure = window.isSecureContext && location.protocol !== 'file:';
@@ -98,6 +104,8 @@ export default function App() {
     else if (event.type === 'audio-level') {
       setAudioLevel(event.level); setRecentAudioSeconds(session.current?.recentAudioSeconds ?? 0);
     }
+    else if (event.type === 'precision-status') setPrecisionStatus(event.message);
+    else if (event.type === 'precision-result') dispatchPrecision(event);
     else if (event.type === 'usage') dispatchUsage(event);
     else dispatchCaptions({ type: 'message', event, direction });
   }
@@ -114,8 +122,9 @@ export default function App() {
     dispatchCaptions({ type: 'start-session' }); setElapsed(0); setAudioLevel(null); setRecentAudioSeconds(0);
     setKeyExpanded(false);
     setSessionExchangeRate(rate);
-    startedAt.current = 0; followBottom.current = true;
-    const next = new BrowserTranslationSession({ apiKey: apiKey.trim(), direction, pair, mode, audioSource, budgetUsd: amount,
+    startedAt.current = 0; followBottom.current = true; followPrecisionBottom.current = true;
+    setPrecisionStatus(precisionReview ? '準備回聽；首次結果約在收音 13 秒後加上 AI 處理時間出現。' : '本場回聽已關閉，先前結果仍保留。');
+    const next = new BrowserTranslationSession({ apiKey: apiKey.trim(), direction, pair, mode, audioSource, budgetUsd: amount, precisionReview,
       customVocabulary: parseVocabulary(vocabulary), context: captions.slice(-4)
         .map(item => `${DIRECTIONS[item.direction].sourceLabel}: ${item.original}`).join('\n').slice(-512) }, receive);
     session.current = next;
@@ -160,6 +169,10 @@ export default function App() {
     const pane = captionPane.current;
     if (pane && followBottom.current) pane.scrollTop = pane.scrollHeight;
   }, [captions]);
+  useEffect(() => {
+    const pane = precisionPane.current;
+    if (pane && followPrecisionBottom.current) pane.scrollTop = pane.scrollHeight;
+  }, [precisionWindows]);
 
   // Replacing/clearing a clip releases its URL, including on unmount. Nothing goes to storage.
   useEffect(() => () => { if (audioClip) URL.revokeObjectURL(audioClip.url); }, [audioClip]);
@@ -167,11 +180,14 @@ export default function App() {
   const paragraphs = useMemo(() => groupCaptions(captions), [captions]);
   const textOutput = useMemo(() => exportParagraphs(paragraphs, showOriginal), [paragraphs, showOriginal]);
   const comparisonOutput = useMemo(() => exportComparison(captions), [captions]);
+  const precisionOutput = useMemo(() => exportPrecision(precisionWindows), [precisionWindows]);
+  const visiblePrecisionWindows = useMemo(() => precisionWindows.filter(item => item.segments.length), [precisionWindows]);
   const hasUsage = usage.audioSeconds > 0 || usage.translationRequests > 0 || usage.estimatedUsd > 0;
 
   function clearHistory() {
     session.current?.dispose(); session.current = null;
     dispatchCaptions({ type: 'clear-history' });
+    dispatchPrecision({ type: 'clear-history' }); setPrecisionStatus('尚未開啟本場回聽。');
     dispatchUsage({ type: 'clear-history' });
     startedAt.current = 0; setElapsed(0); setAudioLevel(null); setRecentAudioSeconds(0); setAudioClip(null);
     setMessage('已清除字幕紀錄與累計用量、費用。');
@@ -199,6 +215,14 @@ export default function App() {
     const url = URL.createObjectURL(new Blob(['\uFEFF', textOutput], { type: 'text/plain;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url; link.download = `即時翻譯_${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  function downloadPrecision() {
+    const url = URL.createObjectURL(new Blob(['\uFEFF', precisionOutput], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a'); link.href = url;
+    link.download = `精準回聽_${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
     document.body.appendChild(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
@@ -244,6 +268,11 @@ export default function App() {
         <button className="stop" disabled={!running || status === 'finishing'} onClick={() => void session.current?.stop()}>■ 停止</button>
       </div>
     </section>
+    <div className="precision-toggle">
+      <label className="switch"><input type="checkbox" checked={precisionReview} disabled={running}
+        onChange={event => { setPrecisionReview(event.target.checked); savePrecisionReview(event.target.checked); }} />精準回聽校正（額外計費）</label>
+      <small>每約 12 秒將原音交給 AI 重聽，結果另列於下方。包含安靜片段，不依賴即時字幕觸發；費用併入台幣估算。{running ? '停止後可更改開關。' : '預設關閉，會記住你的選擇。'}</small>
+    </div>
     {audioSource === 'display' && <p className="source-hint">按開始後選擇正在播放的分頁，勾選「分享分頁音訊」。分享視窗或整個螢幕時也必須包含音訊；只傳聲音，不傳畫面。</p>}
     <div className="settings-row"><details className="recognition-settings"><summary>收音與辨識設定（選填）</summary>
       <label htmlFor="vocabulary">常用詞：姓名、地名或專有名詞</label>
@@ -313,15 +342,35 @@ export default function App() {
       <div className="export-actions"><button disabled={!textOutput} onClick={() => void navigator.clipboard.writeText(textOutput)
         .then(() => setMessage('字幕已複製。')).catch(() => setMessage('瀏覽器無法複製，請使用下載 TXT。'))}>複製文字</button>
         <button disabled={!textOutput} onClick={download}>下載 TXT</button>
-        <button disabled={(!captions.length && !hasUsage && !recentAudioSeconds && !audioClip) || running} title="清除字幕、原音與累計用量、費用" onClick={clearHistory}>清除紀錄</button></div>
+        <button disabled={(!captions.length && !precisionWindows.length && !hasUsage && !recentAudioSeconds && !audioClip) || running} title="清除字幕、回聽結果、原音與累計用量、費用" onClick={clearHistory}>清除紀錄</button></div>
     </section>
+    {(precisionReview || precisionWindows.length > 0) && <section className="precision-panel">
+      <div className="section-title"><h2>精準回聽校正</h2><button disabled={!precisionOutput} onClick={downloadPrecision}>下載回聽 TXT</button></div>
+      <p className="precision-hint" role="status">{precisionStatus}</p>
+      <p className="precision-hint">直接重聽原音，可能補回漏字，仍可能聽錯。下方保留回聽版本，方便和上方即時字幕比較；片段交界處的詞句仍可能重複或斷開。</p>
+      {precisionWindows.length > 0 && <p className="precision-hint">最近完成的回聽位置 {audioTime(precisionWindows.at(-1)!.endSeconds)}。未辨識到清楚語音的片段不另外列出，仍記錄於下載檔。</p>}
+      <div className="precision-results" ref={precisionPane} onScroll={event => {
+        const pane = event.currentTarget; followPrecisionBottom.current = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
+      }}>
+        {!visiblePrecisionWindows.length && <p className="precision-hint">{precisionWindows.length ? '目前回聽尚未辨識到清楚語音。' : '結果會依收音順序顯示；即使即時字幕完全沒出現，也會進行回聽。'}</p>}
+        {visiblePrecisionWindows.map((item, index) => <article className="caption" key={item.id}>
+          <small>{index === 0 || visiblePrecisionWindows[index - 1].sessionId !== item.sessionId ? '新場次 · ' : ''}收音位置 {audioTime(item.startSeconds)}–{audioTime(item.endSeconds)}</small>
+          {item.segments.map((segment, part) => <div className="precision-segment" key={part}>
+            <small>{DIRECTIONS[segment.direction].sourceLabel} → {DIRECTIONS[segment.direction].targetLabel}</small>
+            {showOriginal && <p className="original" lang={sourceLang(segment.direction)}>{segment.original}</p>}
+            <p className="translation" lang={targetLang(segment.direction)}>{segment.translation}</p>
+          </div>)}
+        </article>)}
+      </div>
+    </section>}
     <section className="usage-grid" aria-label="清除紀錄前的累計用量與費用">
       <div><span>累計音訊</span><strong>{usage.audioSeconds.toFixed(1)} 秒</strong></div>
-      <div><span>累計翻譯請求</span><strong>{usage.translationRequests}</strong></div>
-      <div><span>累計文字 Tokens{usage.tokenEstimate ? '（估算）' : ''}</span><strong>{usage.inputTokens ?? '未知'} / {usage.outputTokens ?? '未知'}</strong></div>
+      <div><span>累計翻譯請求</span><strong>{usage.translationRequests}</strong>{Boolean(usage.reviewRequests) && <small>另有 {usage.reviewRequests} 次原音回聽 · {usage.reviewAudioSeconds?.toFixed(1)} 秒（含重疊）</small>}</div>
+      <div><span>累計輸入／輸出 Tokens{usage.tokenEstimate ? '（估算）' : ''}</span><strong>{usage.inputTokens ?? '未知'} / {usage.outputTokens ?? '未知'}</strong></div>
       <div><span>累計估算費用（台幣）</span><strong>{formatTwd(usdToTwd(usage.estimatedUsd, displayRate))}</strong>
         <small>US$1 ≈ NT${displayRate.toLocaleString('zh-TW', {maximumFractionDigits:4})}</small></div>
     </section>
-    <footer>版本 2.4.0 · 原音回放與辨識稿對照 · 重新整理會清除字幕、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
+    {Boolean(usage.reviewRequests) && <p className="precision-cost">總額已含回聽估算 {formatTwd(usdToTwd(usage.reviewEstimatedUsd ?? 0, displayRate))}；送出前先保留輸出上限費用，收到用量後更新。回聽失敗也可能計費。</p>}
+    <footer>版本 2.5.0 · 可選原音精準回聽 · 重新整理會清除字幕、回聽結果、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
   </main>;
 }

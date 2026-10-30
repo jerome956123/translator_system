@@ -4,6 +4,7 @@ import { DEFAULT_USD_TWD, validExchangeRate } from './currency';
 export const API_KEY_STORAGE_KEY = 'realtime-translator.api-key.v1';
 const VOCABULARY_STORAGE_KEY = 'realtime-translator.vocabulary.v1';
 const EXCHANGE_RATE_STORAGE_KEY = 'realtime-translator.usd-twd.v1';
+const PRECISION_STORAGE_KEY = 'realtime-translator.precision.v1';
 type KeyStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 function loadPreference(key: string, storage?: KeyStorage): string {
@@ -24,6 +25,8 @@ export const loadApiKey = (storage?: KeyStorage) => loadPreference(API_KEY_STORA
 export const saveApiKey = (value: string, storage?: KeyStorage) => savePreference(API_KEY_STORAGE_KEY, value, storage);
 export const loadVocabulary = () => loadPreference(VOCABULARY_STORAGE_KEY);
 export const saveVocabulary = (value: string) => savePreference(VOCABULARY_STORAGE_KEY, value);
+export const loadPrecisionReview = (storage?: KeyStorage) => loadPreference(PRECISION_STORAGE_KEY, storage) === 'on';
+export const savePrecisionReview = (value: boolean, storage?: KeyStorage) => savePreference(PRECISION_STORAGE_KEY, value ? 'on' : '', storage);
 export function loadExchangeRate(storage?: KeyStorage): number {
   const saved = Number(loadPreference(EXCHANGE_RATE_STORAGE_KEY, storage));
   return validExchangeRate(saved) ? saved : DEFAULT_USD_TWD;

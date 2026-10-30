@@ -10,6 +10,8 @@ import { UsageTracker } from './usage';
 import { sourceText, translatedText } from './chinese';
 import type { SessionSettings, TranslationTask, TranslationResult, ReviewCaption } from './types';
 import { directionSource, directionFor, isPairLanguage, languageFromCode, previewDirection } from './languages';
+import { PrecisionReviewer } from './precision-review';
+import { reviewAudio, reviewCost } from './audio-review';
 
 interface Capture {
   prepare: () => Promise<void>;
@@ -20,6 +22,7 @@ interface Dependencies {
   capture?: Capture;
   createSTT?: (callbacks: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onError: (message: string) => void }) => STTConnection;
   translate?: typeof streamTranslation;
+  reviewAudio?: typeof reviewAudio;
 }
 
 export class BrowserTranslationSession {
@@ -36,6 +39,7 @@ export class BrowserTranslationSession {
   private startupAudio: ArrayBuffer[] = [];
   private startupBytes = 0;
   private recentAudio = new RecentAudio();
+  private reviewer?: PrecisionReviewer;
   private finishing?: Promise<void>;
   private lastUsage = 0;
   private lastLevelAt = -Infinity;
@@ -53,6 +57,14 @@ export class BrowserTranslationSession {
   constructor(private settings: SessionSettings, private emit: (event: ServerMessage) => void, dependencies: Dependencies = {}) {
     this.capture = dependencies.capture ?? new AudioCapture(settings.audioSource);
     this.previousLanguage = directionSource(settings.direction);
+    if (settings.precisionReview) this.reviewer = new PrecisionReviewer(this.id, settings, {
+      emit: event => this.send(event),
+      beforeRequest: estimate => !this.disposed && (!settings.budgetUsd
+        || this.usage.snapshot().estimatedUsd + reviewCost(estimate) < settings.budgetUsd),
+      onUsage: (id, seconds, usage) => {
+        this.usage.recordReview(id, seconds, usage); this.sendUsage(); this.budget();
+      },
+    }, dependencies.reviewAudio);
     // 雙向對話的辨識輪次分開翻譯，避免不同語言／說話者黏成同一句；同方向仍合併顯示。
     this.assembler = new TranscriptAssembler(this.id, settings.direction, Date.now, !settings.pair);
     const callbacks = {
@@ -202,6 +214,8 @@ export class BrowserTranslationSession {
     try {
       if (this.stt.sendAudio(chunk)) {
         this.usage.addAudioBytes(chunk.byteLength);
+        this.reviewer?.append(chunk);
+        if (this.disposed) return;
         const now = Date.now();
         const level = pcmLevel(chunk);
         if (now - this.lastLevelAt >= 200) {
@@ -287,7 +301,7 @@ export class BrowserTranslationSession {
     this.finalArrived = undefined;
     this.ready = false;
     this.stt.close();
-    const finished = await this.scheduler.flush(8000);
+    const [finished] = await Promise.all([this.scheduler.flush(8000), this.reviewer?.finish()]);
     if (this.disposed) return;
     this.sendUsage();
     this.status('stopped', finished ? '已停止，字幕可以複製或下載。' : '已停止；尚未完成的內容保留為草稿。');
@@ -303,6 +317,7 @@ export class BrowserTranslationSession {
 
   dispose() {
     if (this.disposed) return;
+    this.reviewer?.close();
     this.disposed = true;
     this.stopping = true;
     this.ready = false;

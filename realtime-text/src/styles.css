@@ -103,6 +103,15 @@ button.stop { color: #ffbbc2; background: #31141c; border-color: #63303b; }
 .comparison-grid > div { min-width: 0; }
 .comparison-grid p { white-space: pre-wrap; }
 footer { color: #60748c; text-align: center; font-size: 10px; line-height: 1.5; padding: 2px 4px; }
+.precision-toggle { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding: 4px 2px; }
+.precision-toggle small, .precision-cost { color: #98aac0; font-size: 11px; line-height: 1.6; margin: 0; }
+.precision-panel { border: 1px solid #35556a; background: #0c1727; border-radius: 12px; overflow: hidden; flex-shrink: 0; }
+.precision-panel .section-title h2 { font-size: 16px; }
+.precision-panel .section-title button { font-size: 12px; }
+.precision-hint { color: #98aac0; font-size: 12px; line-height: 1.7; padding: 0 14px; margin: 7px 0; }
+.precision-results { max-height: 360px; overflow-y: auto; padding: 4px 12px; }
+.precision-segment { margin-top: 10px; }
+.precision-segment + .precision-segment { border-top: 1px solid #304159; padding-top: 10px; }
 @media (pointer: fine) {
   button { min-height: 38px; }
 }

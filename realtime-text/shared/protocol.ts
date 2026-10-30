@@ -18,6 +18,19 @@ export type LanguagePair = keyof typeof LANGUAGE_PAIRS;
 export type Mode = 'saving' | 'fast';
 export type AudioSource = 'microphone' | 'display';
 
+export interface PrecisionSegment {
+  direction: Direction;
+  original: string;
+  translation: string;
+}
+export interface PrecisionWindow {
+  id: string;
+  sessionId: string;
+  startSeconds: number;
+  endSeconds: number;
+  segments: PrecisionSegment[];
+}
+
 export type ClientMessage =
   | { type: 'start'; sessionId: string; direction: Direction; mode: Mode; budgetUsd?: number }
   | { type: 'stop'; sessionId: string };
@@ -30,9 +43,14 @@ export interface UsageSnapshot {
   estimatedUsd: number;
   isEstimate: boolean;
   tokenEstimate?: boolean;
+  reviewRequests?: number;
+  reviewAudioSeconds?: number;
+  reviewEstimatedUsd?: number;
 }
 
 export type ServerMessage =
+  | { type: 'precision-result'; sessionId: string; window: PrecisionWindow }
+  | { type: 'precision-status'; sessionId: string; state: 'waiting' | 'working' | 'stopped' | 'error'; message: string }
   | { type: 'status'; sessionId: string; status: 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped'; message?: string }
   | { type: 'audio-level'; sessionId: string; level: number }
   | { type: 'transcript'; sessionId: string; captionId: string; paragraphId?: string; direction?: Direction; rawText?: string; revision: number; text: string; final: boolean; receivedAt: number }

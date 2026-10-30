@@ -4,6 +4,15 @@ const pcm = (samples: number[]) => new Int16Array(samples).buffer;
 const samples = (wav: ArrayBuffer) => Array.from(new Int16Array(wav.slice(44)));
 
 describe('有界的本機原音暫存', () => {
+  it('依收音時間擷取跨區塊範圍，WAV 長度與實際樣本一致', () => {
+    const audio = new RecentAudio(2, 4); audio.append(pcm([1,2,3,4])); audio.append(pcm([5,6,7,8]));
+    audio.append(pcm([9,10]));
+    const clip = audio.snapshot(1, 2)!;
+    expect(clip).toMatchObject({ startSeconds: 1, endSeconds: 2, durationSeconds: 1 });
+    expect(samples(clip.wav)).toEqual([5,6,7,8]); expect(new DataView(clip.wav).getUint32(40, true)).toBe(8);
+    expect(audio.elapsedSeconds).toBe(2.5); expect(audio.snapshot(3, 4)).toBeUndefined();
+    expect(audio.snapshot(NaN, 2)).toBeUndefined();
+  });
   it('產生可解碼的單聲道 16-bit WAV，保留頭尾及零音量樣本', () => {
     const audio = new RecentAudio(); audio.append(pcm([12,0,-34])); audio.append(pcm([0,56]));
     const clip = audio.snapshot()!; const view = new DataView(clip.wav); const bytes = new Uint8Array(clip.wav);
