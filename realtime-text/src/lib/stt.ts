@@ -4,11 +4,14 @@ interface Callbacks {
   onInterim: (text: string, languageCode?: string) => void;
   onFinal: (text: string, languageCode?: string) => void;
   onError: (message: string) => void;
+  onTurnComplete?: () => void;
 }
 
 export interface STTConnection {
-  connect: (apiKey: string, language: string | string[], customVocabulary?: string[]) => Promise<void>;
+  connect: (apiKey: string, language: string | string[], customVocabulary?: string[], manualActivity?: boolean) => Promise<void>;
   sendAudio: (pcm: ArrayBuffer) => boolean;
+  startActivity: () => boolean;
+  endActivity: () => boolean;
   endAudio: () => void;
   close: () => void;
 }
@@ -21,7 +24,7 @@ export class GeminiBrowserSTT implements STTConnection {
 
   constructor(private callbacks: Callbacks) {}
 
-  connect(apiKey: string, language: string | string[], customVocabulary: string[] = []) {
+  connect(apiKey: string, language: string | string[], customVocabulary: string[] = [], manualActivity = false) {
     return new Promise<void>((resolve, reject) => {
       this.rejectConnect = reject;
       const socket = new WebSocket(`wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`);
@@ -40,7 +43,7 @@ export class GeminiBrowserSTT implements STTConnection {
             ...(customVocabulary.length ? { customVocabulary } : {}),
           },
           // 保留短停頓中的同一句；草稿仍持續輸出，不必等到停頓結束。
-          realtimeInputConfig: { automaticActivityDetection: {
+          realtimeInputConfig: { automaticActivityDetection: manualActivity ? { disabled: true } : {
             disabled: false, startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH', prefixPaddingMs: 20, silenceDurationMs: 800,
           } },
         } }));
@@ -66,6 +69,7 @@ export class GeminiBrowserSTT implements STTConnection {
             if (typeof final.languageCode === 'string') this.callbacks.onFinal(final.text, final.languageCode);
             else this.callbacks.onFinal(final.text);
           }
+          if (content?.turnComplete) this.callbacks.onTurnComplete?.();
           if (message.goAway) this.callbacks.onError('Gemini 要求結束本次連線，請重新開始一場；已保留收到的字幕。');
         }).catch(error => {
           clearTimeout(timeout);
@@ -103,6 +107,14 @@ export class GeminiBrowserSTT implements STTConnection {
 
   endAudio() {
     if (this.ready && this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+  }
+
+  startActivity() { return this.activity('activityStart'); }
+  endActivity() { return this.activity('activityEnd'); }
+  private activity(field: 'activityStart' | 'activityEnd') {
+    if (!this.ready || this.socket?.readyState !== WebSocket.OPEN) return false;
+    this.socket.send(JSON.stringify({ realtimeInput: { [field]: {} } }));
+    return true;
   }
 
   close() {

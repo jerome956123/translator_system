@@ -1,4 +1,4 @@
-import type { AudioSource, Direction, Language, LanguagePair, Mode } from '../../shared/protocol';
+import type { AudioSource, Direction, Language, LanguagePair, ListeningMode, Mode } from '../../shared/protocol';
 
 export interface TranslationResult {
   text: string;
@@ -56,6 +56,7 @@ export interface SessionSettings {
   customVocabulary?: string[];
   context?: string;
   precisionReview?: boolean;
+  listeningMode?: ListeningMode;
 }
 
 export interface Caption {

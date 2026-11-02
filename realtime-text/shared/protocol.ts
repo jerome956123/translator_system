@@ -17,6 +17,8 @@ export const LANGUAGE_PAIRS = {
 export type LanguagePair = keyof typeof LANGUAGE_PAIRS;
 export type Mode = 'saving' | 'fast';
 export type AudioSource = 'microphone' | 'display';
+export type ListeningMode = 'automatic' | 'push-to-talk';
+export type TalkState = 'idle' | 'speaking' | 'tail' | 'finishing' | 'closed';
 
 export interface PrecisionSegment {
   direction: Direction;
@@ -49,6 +51,7 @@ export interface UsageSnapshot {
 }
 
 export type ServerMessage =
+  | { type: 'talk-state'; sessionId: string; state: TalkState }
   | { type: 'precision-result'; sessionId: string; window: PrecisionWindow }
   | { type: 'precision-status'; sessionId: string; state: 'waiting' | 'working' | 'stopped' | 'error'; message: string }
   | { type: 'status'; sessionId: string; status: 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped'; message?: string }

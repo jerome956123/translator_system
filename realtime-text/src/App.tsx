@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { DIRECTIONS, LANGUAGE_PAIRS, type AudioSource, type LanguagePair, type Mode, type ServerMessage } from '../shared/protocol';
+import { DIRECTIONS, LANGUAGE_PAIRS, type AudioSource, type LanguagePair, type ListeningMode, type TalkState, type Mode, type ServerMessage } from '../shared/protocol';
 import { BrowserTranslationSession } from './lib/session';
 import { exportParagraphs, groupCaptions, inlineText, joinSpeech } from './lib/paragraphs';
-import { loadApiKey, saveApiKey, loadVocabulary, saveVocabulary, parseVocabulary, loadExchangeRate, saveExchangeRate, loadPrecisionReview, savePrecisionReview } from './lib/preferences';
+import { loadApiKey, saveApiKey, loadVocabulary, saveVocabulary, parseVocabulary, loadExchangeRate, saveExchangeRate, loadPrecisionReview, savePrecisionReview, loadListeningMode, saveListeningMode } from './lib/preferences';
 import type { Caption } from './lib/types';
 import { captionHistory } from './lib/history';
 import { INITIAL_USAGE_HISTORY, usageHistory } from './lib/usage-history';
@@ -12,6 +12,7 @@ import { defaultDirection } from './lib/languages';
 import { EXCHANGE_RATE_DATE, EXCHANGE_RATE_SOURCE, formatTwd, twdBudgetToUsd, usdToTwd, validExchangeRate } from './lib/currency';
 import { recognitionText, exportComparison, audioTime } from './lib/diagnostics';
 import { precisionHistory, exportPrecision } from './lib/precision-history';
+import { PushToTalkButton } from './PushToTalkButton';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped' | 'error';
 const LABEL: Record<Status, string> = {
@@ -41,6 +42,8 @@ export default function App() {
   const [pair, setPair] = useState<LanguagePair>('zh-ja');
   const direction = defaultDirection(pair);
   const [mode, setMode] = useState<Mode>('saving');
+  const [listeningMode, setListeningMode] = useState(() => loadListeningMode());
+  const [talkState, setTalkState] = useState<TalkState>('idle');
   const [audioSource, setAudioSource] = useState<AudioSource>('microphone');
   const [audioLevel, setAudioLevel] = useState<number | null>(null);
   const [budget, setBudget] = useState('');
@@ -77,6 +80,10 @@ export default function App() {
   const supported = Boolean(audioSource === 'display' ? displaySupported : navigator.mediaDevices?.getUserMedia)
     && typeof AudioContext !== 'undefined' && 'audioWorklet' in AudioContext.prototype;
   const running = ['connecting', 'ready', 'listening', 'finishing'].includes(status);
+  const manual = listeningMode === 'push-to-talk';
+  const statusLabel = status === 'listening' && manual
+    ? talkState === 'speaking' ? '收音翻譯中' : talkState === 'tail' ? '收完尾音' : talkState === 'finishing' ? '完成這句中' : '對講機待命'
+    : LABEL[status];
   const displayRate = running || !validExchangeRate(Number(exchangeRate)) ? sessionExchangeRate : Number(exchangeRate);
 
   function changeStatus(value: Status) { statusRef.current = value; setStatus(value); }
@@ -104,6 +111,7 @@ export default function App() {
     else if (event.type === 'audio-level') {
       setAudioLevel(event.level); setRecentAudioSeconds(session.current?.recentAudioSeconds ?? 0);
     }
+    else if (event.type === 'talk-state') setTalkState(event.state);
     else if (event.type === 'precision-status') setPrecisionStatus(event.message);
     else if (event.type === 'precision-result') dispatchPrecision(event);
     else if (event.type === 'usage') dispatchUsage(event);
@@ -119,12 +127,12 @@ export default function App() {
     catch (error) { setMessage(error instanceof Error ? error.message : '請檢查預算與匯率。'); return; }
     session.current?.dispose();
     changeStatus('connecting');
-    dispatchCaptions({ type: 'start-session' }); setElapsed(0); setAudioLevel(null); setRecentAudioSeconds(0);
+    dispatchCaptions({ type: 'start-session' }); setElapsed(0); setAudioLevel(null); setRecentAudioSeconds(0); setTalkState('idle');
     setKeyExpanded(false);
     setSessionExchangeRate(rate);
     startedAt.current = 0; followBottom.current = true; followPrecisionBottom.current = true;
-    setPrecisionStatus(precisionReview ? '準備回聽；首次結果約在收音 13 秒後加上 AI 處理時間出現。' : '本場回聽已關閉，先前結果仍保留。');
-    const next = new BrowserTranslationSession({ apiKey: apiKey.trim(), direction, pair, mode, audioSource, budgetUsd: amount, precisionReview,
+    setPrecisionStatus(precisionReview ? '準備回聽；首次結果約在累積送出 13 秒音訊後加上 AI 處理時間出現。' : '本場回聽已關閉，先前結果仍保留。');
+    const next = new BrowserTranslationSession({ apiKey: apiKey.trim(), direction, pair, mode, audioSource, budgetUsd: amount, precisionReview, listeningMode,
       customVocabulary: parseVocabulary(vocabulary), context: captions.slice(-4)
         .map(item => `${DIRECTIONS[item.direction].sourceLabel}: ${item.original}`).join('\n').slice(-512) }, receive);
     session.current = next;
@@ -231,7 +239,7 @@ export default function App() {
   return <main className={`page-shell ${running ? 'session-active' : ''}`}>
     <header className="hero">
       <h1>即時翻譯字幕</h1>
-      <span className={`status status-${status}`}><i />{LABEL[status]}</span>
+      <span className={`status status-${status}`}><i />{statusLabel}</span>
     </header>
 
     {!secure && <div className="notice error-notice" role="alert">請用 HTTPS 網址開啟網頁，電腦測試也可使用 localhost。直接點開 HTML 或使用手機的 HTTP 網址無法開始收音。</div>}
@@ -264,14 +272,24 @@ export default function App() {
       </select></label>
       <label>本場預算上限（台幣）<input value={budget} disabled={running} inputMode="decimal" placeholder="NT$，留空不限制" onChange={event => setBudget(event.target.value)} /></label>
       <div className="main-actions">
-        <button className="primary" disabled={running || !apiKey.trim() || !secure || !supported} onClick={start}>● {captions.length ? '繼續聆聽' : '開始聆聽'}</button>
+        <button className="primary" disabled={running || !apiKey.trim() || !secure || !supported} onClick={start}>● {manual ? captions.length ? '繼續待命' : '開始待命' : captions.length ? '繼續聆聽' : '開始聆聽'}</button>
         <button className="stop" disabled={!running || status === 'finishing'} onClick={() => void session.current?.stop()}>■ 停止</button>
       </div>
+    </section>
+    <section className="talk-panel">
+      <label>聆聽方式<select value={listeningMode} disabled={running} onChange={event => {
+        const next = event.target.value as ListeningMode; setListeningMode(next); saveListeningMode(next);
+      }}><option value="push-to-talk">對講機 · 按住說話</option><option value="automatic">自動 · 持續聆聽</option></select></label>
+      {manual ? <PushToTalkButton disabled={status !== 'listening' || talkState === 'finishing' || talkState === 'closed'} state={talkState}
+        onPress={() => session.current?.pressTalk() ?? false} onRelease={() => session.current?.releaseTalk()} />
+        : <p>按開始後自動辨識開口與停頓，持續顯示翻譯。</p>}
+      <small>{manual ? '先按「開始待命」。麥克風保持開啟；送出按下前最多 0.8 秒、按住期間與放開後約 0.3 秒的聲音。打字時空白鍵照常使用，視窗失去焦點會結束這句。'
+        : '自動模式會持續送出聲音，不需按住按鈕。停止後可切換方式，會記住選擇。'}</small>
     </section>
     <div className="precision-toggle">
       <label className="switch"><input type="checkbox" checked={precisionReview} disabled={running}
         onChange={event => { setPrecisionReview(event.target.checked); savePrecisionReview(event.target.checked); }} />精準回聽校正（額外計費）</label>
-      <small>每約 12 秒將原音交給 AI 重聽，結果另列於下方。包含安靜片段，不依賴即時字幕觸發；費用併入台幣估算。{running ? '停止後可更改開關。' : '預設關閉，會記住你的選擇。'}</small>
+      <small>每累積送出約 12 秒原音交給 AI 重聽，結果另列於下方。{manual ? '只回聽按鍵選取的音訊，時間依送出音訊累計。' : '包含安靜片段，不依賴即時字幕觸發。'}費用併入台幣估算。{running ? '停止後可更改開關。' : '預設關閉，會記住你的選擇。'}</small>
     </div>
     {audioSource === 'display' && <p className="source-hint">按開始後選擇正在播放的分頁，勾選「分享分頁音訊」。分享視窗或整個螢幕時也必須包含音訊；只傳聲音，不傳畫面。</p>}
     <div className="settings-row"><details className="recognition-settings"><summary>收音與辨識設定（選填）</summary>
@@ -323,7 +341,7 @@ export default function App() {
       <div className="captions" ref={captionPane} onScroll={event => {
         const pane = event.currentTarget; followBottom.current = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
       }}>
-        {!captions.length && <div className="empty"><span>聲</span><p>{audioSource === 'microphone' ? '按開始，收聽說話與喇叭外放聲' : '按開始，分享播放分頁的音訊'}</p><small>電腦可切換分頁；手機請保持此頁在前景。</small></div>}
+        {!captions.length && <div className="empty"><span>聲</span><p>{manual ? '先開始待命，再按住空白鍵或上方按鈕說話' : audioSource === 'microphone' ? '按開始，收聽說話與喇叭外放聲' : '按開始，分享播放分頁的音訊'}</p><small>手機請保持此頁在前景。</small></div>}
         {paragraphs.map((item, index) => <Fragment key={item.id}>
           {(index === 0 || paragraphs[index - 1].sessionId !== item.sessionId || paragraphs[index - 1].direction !== item.direction) && <div className="session-divider">
             <strong>{DIRECTIONS[item.direction].sourceLabel} → {DIRECTIONS[item.direction].targetLabel}</strong>
@@ -354,7 +372,7 @@ export default function App() {
       }}>
         {!visiblePrecisionWindows.length && <p className="precision-hint">{precisionWindows.length ? '目前回聽尚未辨識到清楚語音。' : '結果會依收音順序顯示；即使即時字幕完全沒出現，也會進行回聽。'}</p>}
         {visiblePrecisionWindows.map((item, index) => <article className="caption" key={item.id}>
-          <small>{index === 0 || visiblePrecisionWindows[index - 1].sessionId !== item.sessionId ? '新場次 · ' : ''}收音位置 {audioTime(item.startSeconds)}–{audioTime(item.endSeconds)}</small>
+          <small>{index === 0 || visiblePrecisionWindows[index - 1].sessionId !== item.sessionId ? '新場次 · ' : ''}送出音訊位置 {audioTime(item.startSeconds)}–{audioTime(item.endSeconds)}</small>
           {item.segments.map((segment, part) => <div className="precision-segment" key={part}>
             <small>{DIRECTIONS[segment.direction].sourceLabel} → {DIRECTIONS[segment.direction].targetLabel}</small>
             {showOriginal && <p className="original" lang={sourceLang(segment.direction)}>{segment.original}</p>}
@@ -364,13 +382,13 @@ export default function App() {
       </div>
     </section>}
     <section className="usage-grid" aria-label="清除紀錄前的累計用量與費用">
-      <div><span>累計音訊</span><strong>{usage.audioSeconds.toFixed(1)} 秒</strong></div>
+      <div><span>累計送出音訊</span><strong>{usage.audioSeconds.toFixed(1)} 秒</strong></div>
       <div><span>累計翻譯請求</span><strong>{usage.translationRequests}</strong>{Boolean(usage.reviewRequests) && <small>另有 {usage.reviewRequests} 次原音回聽 · {usage.reviewAudioSeconds?.toFixed(1)} 秒（含重疊）</small>}</div>
       <div><span>累計輸入／輸出 Tokens{usage.tokenEstimate ? '（估算）' : ''}</span><strong>{usage.inputTokens ?? '未知'} / {usage.outputTokens ?? '未知'}</strong></div>
       <div><span>累計估算費用（台幣）</span><strong>{formatTwd(usdToTwd(usage.estimatedUsd, displayRate))}</strong>
         <small>US$1 ≈ NT${displayRate.toLocaleString('zh-TW', {maximumFractionDigits:4})}</small></div>
     </section>
     {Boolean(usage.reviewRequests) && <p className="precision-cost">總額已含回聽估算 {formatTwd(usdToTwd(usage.reviewEstimatedUsd ?? 0, displayRate))}；送出前先保留輸出上限費用，收到用量後更新。回聽失敗也可能計費。</p>}
-    <footer>版本 2.5.0 · 可選原音精準回聽 · 重新整理會清除字幕、回聽結果、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
+    <footer>版本 2.6.0 · 對講機／自動聆聽 · 重新整理會清除字幕、回聽結果、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
   </main>;
 }

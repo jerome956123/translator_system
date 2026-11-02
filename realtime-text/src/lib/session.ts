@@ -12,6 +12,7 @@ import type { SessionSettings, TranslationTask, TranslationResult, ReviewCaption
 import { directionSource, directionFor, isPairLanguage, languageFromCode, previewDirection } from './languages';
 import { PrecisionReviewer } from './precision-review';
 import { reviewAudio, reviewCost } from './audio-review';
+import { PushToTalkGate } from '../audio/push-to-talk';
 
 interface Capture {
   prepare: () => Promise<void>;
@@ -20,7 +21,7 @@ interface Capture {
 }
 interface Dependencies {
   capture?: Capture;
-  createSTT?: (callbacks: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onError: (message: string) => void }) => STTConnection;
+  createSTT?: (callbacks: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onError: (message: string) => void; onTurnComplete?: () => void }) => STTConnection;
   translate?: typeof streamTranslation;
   reviewAudio?: typeof reviewAudio;
 }
@@ -40,6 +41,7 @@ export class BrowserTranslationSession {
   private startupBytes = 0;
   private recentAudio = new RecentAudio();
   private reviewer?: PrecisionReviewer;
+  private ptt?: PushToTalkGate;
   private finishing?: Promise<void>;
   private lastUsage = 0;
   private lastLevelAt = -Infinity;
@@ -66,15 +68,29 @@ export class BrowserTranslationSession {
       },
     }, dependencies.reviewAudio);
     // 雙向對話的辨識輪次分開翻譯，避免不同語言／說話者黏成同一句；同方向仍合併顯示。
-    this.assembler = new TranscriptAssembler(this.id, settings.direction, Date.now, !settings.pair);
+    this.assembler = new TranscriptAssembler(this.id, settings.direction, Date.now, !settings.pair && settings.listeningMode !== 'push-to-talk');
     const callbacks = {
       onInterim: (text: string, languageCode?: string) => this.transcript(text, false, languageCode),
       onFinal: (text: string, languageCode?: string) => {
-        this.transcript(text, true, languageCode); this.speechAudioLanguage = undefined; this.finalArrived?.();
+        this.transcript(text, true, languageCode); this.speechAudioLanguage = undefined;
+        this.ptt?.acknowledge(); this.finalArrived?.();
       },
+      onTurnComplete: () => { this.ptt?.acknowledge(); this.finalArrived?.(); },
       onError: (message: string) => { if (!this.stopping && !this.disposed) this.fail(message); },
     };
     this.stt = dependencies.createSTT?.(callbacks) ?? new GeminiBrowserSTT(callbacks);
+    if (settings.listeningMode === 'push-to-talk') this.ptt = new PushToTalkGate({
+      start: () => {
+        this.assembler.beginTurn(); this.speechAudioLanguage = undefined;
+        this.lastTranscriptAt = Date.now(); this.signalSeconds = 0; this.warnedNoTranscript = false;
+        return this.stt.startActivity();
+      },
+      audio: chunk => this.sendAudio(chunk), end: () => {
+        const sent = this.stt.endActivity(); this.sendUsage(); return sent;
+      },
+      state: state => this.send({ type: 'talk-state', sessionId: this.id, state }),
+      error: message => this.fail(message),
+    });
     this.scheduler = new TranslationScheduler({
       intervalMs: settings.mode === 'fast' ? 1000 : 1500,
       prepareTask: task => this.prepareTranslation(task),
@@ -159,13 +175,17 @@ export class BrowserTranslationSession {
     this.started = true;
     this.status('connecting', this.settings.audioSource === 'display'
       ? '請選擇播放中的分頁，並勾選分享音訊；正在準備持續聆聽…'
-      : '正在準備麥克風與 AI 連線，請稍候顯示「持續聆聽中」再說話。');
+      : this.ptt ? '正在準備麥克風與 AI 連線，請稍候顯示「對講機待命」再按住說話。'
+        : '正在準備麥克風與 AI 連線，請稍候顯示「持續聆聽中」再說話。');
     try {
       // 先解鎖音訊處理，再等待網路；符合手機瀏覽器的使用者手勢要求。
       await this.capture.prepare();
       if (this.stopping || this.disposed) return;
       // Preserve audio captured while model setup is pending (the v2.3.3 fix).
-      const connection = this.stt.connect(this.settings.apiKey, this.settings.pair ? [] : DIRECTIONS[this.settings.direction].source, this.settings.customVocabulary);
+      const language = this.settings.pair ? [] : DIRECTIONS[this.settings.direction].source;
+      const connection = this.ptt
+        ? this.stt.connect(this.settings.apiKey, language, this.settings.customVocabulary, true)
+        : this.stt.connect(this.settings.apiKey, language, this.settings.customVocabulary);
       const capture = this.capture.start(chunk => this.audio(chunk), message => { if (!this.stopping) this.fail(message); });
       await Promise.all([connection, capture]);
       if (this.stopping || this.disposed) return;
@@ -177,7 +197,9 @@ export class BrowserTranslationSession {
         if (this.stopping || this.disposed) break;
         this.sendAudio(chunk);
       }
-      if (!this.stopping && !this.disposed) this.status('listening', this.settings.audioSource === 'display'
+      if (!this.stopping && !this.disposed) this.status('listening', this.ptt
+        ? '對講機已待命。按住空白鍵或「按住說話」按鈕開始，放開送出這句。'
+        : this.settings.audioSource === 'display'
         ? '持續聆聽分享音訊中。停頓時也保持連線，按停止才結束。'
         : '持續聆聽中，可以說話。停頓時麥克風與 AI 連線仍保持開啟。');
     } catch (error) {
@@ -194,6 +216,12 @@ export class BrowserTranslationSession {
   private audio(chunk: ArrayBuffer) {
     if (this.disposed) return;
     this.recentAudio.append(chunk);
+    const now = Date.now();
+    if (now - this.lastLevelAt >= 200) {
+      this.lastLevelAt = now;
+      this.send({ type: 'audio-level', sessionId: this.id, level: pcmLevel(chunk) });
+    }
+    if (this.ptt) { this.ptt.append(chunk); return; }
     if (!this.ready) {
       if (this.stopping) return;
       if (this.startupBytes + chunk.byteLength > 16000 * 2 * 20) {
@@ -208,6 +236,8 @@ export class BrowserTranslationSession {
 
   get recentAudioSeconds() { return this.recentAudio.durationSeconds; }
   snapshotAudio() { return this.recentAudio.snapshot(); }
+  pressTalk() { return this.ready && !this.stopping && !this.disposed && Boolean(this.ptt?.press()); }
+  releaseTalk() { this.ptt?.release(); }
 
   private sendAudio(chunk: ArrayBuffer) {
     if (this.disposed) return;
@@ -218,10 +248,6 @@ export class BrowserTranslationSession {
         if (this.disposed) return;
         const now = Date.now();
         const level = pcmLevel(chunk);
-        if (now - this.lastLevelAt >= 200) {
-          this.lastLevelAt = now;
-          this.send({ type: 'audio-level', sessionId: this.id, level });
-        }
         if (level >= 0.008) this.signalSeconds += chunk.byteLength / 32000;
         if (!this.stopping && !this.warnedNoTranscript && this.signalSeconds >= 2 && now - this.lastTranscriptAt > 15000) {
           this.warnedNoTranscript = true;
@@ -290,11 +316,12 @@ export class BrowserTranslationSession {
   private async finish() {
     await this.capture.stop(true);
     if (this.disposed) return;
-    if (this.ready) {
+    if (this.ready && (!this.ptt || this.ptt.pending)) {
       await new Promise<void>(resolve => {
         this.finalArrived = () => { clearTimeout(this.finishTimer); resolve(); };
-        this.finishTimer = setTimeout(resolve, 1800);
-        this.stt.endAudio();
+        this.finishTimer = setTimeout(resolve, this.ptt ? 5000 : 1800);
+        if (this.ptt) this.ptt.endNow();
+        else this.stt.endAudio();
       });
     } else this.stt.close();
     if (this.disposed) return;
@@ -317,6 +344,7 @@ export class BrowserTranslationSession {
 
   dispose() {
     if (this.disposed) return;
+    this.ptt?.close();
     this.reviewer?.close();
     this.disposed = true;
     this.stopping = true;

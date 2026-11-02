@@ -6,7 +6,7 @@
 
 1. 開啟 GitHub repository，進入原本存放 `index.html` 的發佈資料夾。
 2. 選 **Add file → Upload files**，拖入這次修改後、資料夾最外層的 `index.html`，按 **Commit changes** 儲存。
-3. 等待 Pages 更新，用原本的 HTTPS 網站首頁網址開啟。頁尾應顯示「版本 2.5.0」，沒有就重新整理。
+3. 等待 Pages 更新，用原本的 HTTPS 網站首頁網址開啟。頁尾應顯示「版本 2.6.0」，沒有就重新整理。
 4. 在手機 Safari／Chrome 中貼上 Gemini API Key，按開始並允許麥克風。下次使用同一個瀏覽器會自動帶入。
 
 這個檔案包含所需程式與樣式，不需同時上傳 `realtime-text`、`node_modules` 或 `.env`。注意：`realtime-text` 裡面的 `index.html` 是原始碼入口，請上傳最外層的成品。
@@ -20,6 +20,8 @@
 已附 `.github/workflows/realtime-pages.yml`。上傳整個專案後，在 Pages 選 **GitHub Actions**，再到 Actions 選 **Deploy realtime subtitles to GitHub Pages → Run workflow**。不需要填 Gemini secret；使用者在發佈後的頁面自行輸入 Key。這個方式會將新版作為 Pages 首頁。
 
 ## 使用時
+
+新版預設對講機：先按「開始待命」，等「對講機待命」，電腦按住空白鍵說話，手機按住「按住說話」按鈕；放開收尾，回待命後再講下一句。會補送按下前最多 0.8 秒及放開後約 0.3 秒。也可在開始前把「聆聽方式」改回自動，選擇會記住。待命麥克風保持開啟；按停止才結束整場。
 
 新增可選的「精準回聽校正（額外計費）」：開始前開啟，會把原音每約 12 秒重新交給 AI 辨識及翻譯，在獨立區域顯示結果，可另下載回聽 TXT。開關會記住選擇，預設關閉；它不依賴即時字幕或音量門檻，包含安靜片段。額外用量併入台幣費用及本場預算。無法保證沒有漏字，實際效果仍需真人語音測試。
 

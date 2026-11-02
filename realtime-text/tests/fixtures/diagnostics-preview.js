@@ -1,7 +1,8 @@
 // Local UI fixture only. It is never imported by the production app.
 (() => {
   const metrics = { microphoneRequests: 0, modelConnections: 0, translationRequests: 0, reviewRequests: 0, audioPackets: 0,
-    silencePackets: 0, quietPackets: 0, reviewWavBytes: [] };
+    silencePackets: 0, quietPackets: 0, reviewWavBytes: [], activityStarts: 0, activityEnds: 0,
+    audioOutsideActivity: 0, sentSeconds: 0, manualActivity: false };
   function report() {
     let node = document.getElementById('qa-metrics');
     if (!node && document.body) {
@@ -27,24 +28,39 @@
   };
   class TestSocket {
     static OPEN = 1; static CLOSING = 2;
-    readyState = 1; bufferedAmount = 0; packets = 0;
+    readyState = 1; bufferedAmount = 0; packets = 0; turnPackets = 0; active = false;
     constructor() {
       metrics.modelConnections++; report(); queueMicrotask(() => this.onopen?.());
     }
     message(data) { this.onmessage?.({data:JSON.stringify(data)}); }
     send(raw) {
       const message = JSON.parse(raw);
-      if (message.setup) queueMicrotask(() => this.message({setupComplete:{}}));
+      if (message.setup) {
+        this.manual = Boolean(message.setup.realtimeInputConfig?.automaticActivityDetection?.disabled);
+        metrics.manualActivity = this.manual; report();
+        queueMicrotask(() => this.message({setupComplete:{}}));
+      }
+      if (message.realtimeInput?.activityStart) {
+        this.active = true; this.turnPackets = 0; metrics.activityStarts++; report();
+      }
       if (message.realtimeInput?.audio) {
-        this.packets++; metrics.audioPackets++; report();
+        this.packets++; this.turnPackets++; metrics.audioPackets++;
+        if (this.manual && !this.active) metrics.audioOutsideActivity++;
         const binary = atob(message.realtimeInput.audio.data);
         const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
         const samples = new Int16Array(bytes.buffer);
+        metrics.sentSeconds += samples.length / 16000;
         const peak = samples.reduce((value, sample) => Math.max(value, Math.abs(sample)), 0);
         if (!peak) metrics.silencePackets++;
         else if (peak < 50) metrics.quietPackets++;
-        if(this.packets===4) this.message({serverContent:{interimInputTranscription:{text:'下周二去庆生',languageCode:'cmn-Hans-CN'}}});
-        if(this.packets===9) this.message({serverContent:{inputTranscription:{text:'下周二去庆生。',languageCode:'cmn-Hans-CN'}}});
+        if((this.manual ? this.turnPackets : this.packets)===4) this.message({serverContent:{interimInputTranscription:{text:this.manual?'第一個字也有保留':'下周二去庆生',languageCode:'cmn-Hans-CN'}}});
+        if(!this.manual && this.packets===9) this.message({serverContent:{inputTranscription:{text:'下周二去庆生。',languageCode:'cmn-Hans-CN'}}});
+        report();
+      }
+      if (message.realtimeInput?.activityEnd) {
+        this.active = false; metrics.activityEnds++; report();
+        queueMicrotask(() => this.message({serverContent:{inputTranscription:{
+          text:metrics.activityEnds===1?'第一個字也有保留。':'第二句也完整。',languageCode:'cmn-Hans-CN'},turnComplete:true}}));
       }
     }
     close() { this.readyState=3; this.onclose?.({code:1000,reason:''}); }
@@ -67,7 +83,10 @@
         {headers:{'Content-Type':'application/json'}});
     }
     metrics.translationRequests++; report();
-    const result = {sourceLanguage:'zh',original:'下週二去青森。',translation:'来週火曜日に青森へ行きます。',corrections:[]};
+    const prompt = JSON.parse(options.body).contents[0].parts[0].text;
+    const current = JSON.parse(prompt.split('DATA: ').at(-1)).current;
+    const result = {sourceLanguage:'zh',original:metrics.manualActivity?current:'下週二去青森。',
+      translation:metrics.manualActivity?'最初の文字も含めて翻訳しています。':'来週火曜日に青森へ行きます。',corrections:[]};
     const event = {candidates:[{content:{parts:[{text:JSON.stringify(result)}]},finishReason:'STOP'}],
       usageMetadata:{promptTokenCount:100,candidatesTokenCount:20}};
     return new Response('data: '+JSON.stringify(event)+'\n\n',{headers:{'Content-Type':'text/event-stream'}});

@@ -104,6 +104,13 @@ button.stop { color: #ffbbc2; background: #31141c; border-color: #63303b; }
 .comparison-grid p { white-space: pre-wrap; }
 footer { color: #60748c; text-align: center; font-size: 10px; line-height: 1.5; padding: 2px 4px; }
 .precision-toggle { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding: 4px 2px; }
+.talk-panel { display: grid; grid-template-columns: minmax(170px, 220px) minmax(240px, 1fr); gap: 8px 14px; align-items: center; padding: 10px 12px; border: 1px solid #35556a; border-radius: 10px; background: #0c1727; }
+.talk-panel small { grid-column: 1 / -1; color: #98aac0; font-size: 11px; line-height: 1.6; }
+.talk-panel p { color: #98aac0; font-size: 12px; margin: 0; }
+.talk-button { min-height: 48px; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; color: #c5fff3; border-color: #397a72; }
+.talk-button.talk-speaking { color: #032a22; background: #54dbc5; border-color: #54dbc5; }
+.talk-button.talk-tail { border-color: #dbb954; color: #f4df9e; }
+.talk-button:focus-visible { outline: 2px solid #54dbc5; outline-offset: 3px; }
 .precision-toggle small, .precision-cost { color: #98aac0; font-size: 11px; line-height: 1.6; margin: 0; }
 .precision-panel { border: 1px solid #35556a; background: #0c1727; border-radius: 12px; overflow: hidden; flex-shrink: 0; }
 .precision-panel .section-title h2 { font-size: 16px; }
@@ -120,6 +127,8 @@ footer { color: #60748c; text-align: center; font-size: 10px; line-height: 1.5; 
   .main-actions { grid-column: 1 / -1; justify-content: flex-end; }
 }
 @media (max-width: 600px) {
+  .talk-panel { grid-template-columns: 1fr; }
+  .session-active .talk-panel > label { display: none; }
   .comparison-grid { grid-template-columns: 1fr; }
   .diagnostic-actions button, .diagnostic-actions a { min-height: 44px; }
   button, .key-summary button, .export-actions button { min-height: 44px; }

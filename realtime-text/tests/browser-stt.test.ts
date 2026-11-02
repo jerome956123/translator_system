@@ -20,6 +20,21 @@ const settle = async () => { await Promise.resolve(); await Promise.resolve(); a
 afterEach(() => vi.unstubAllGlobals());
 
 describe('瀏覽器直連語音協定', () => {
+  it('對講機停用自動 VAD，明確依序送出 activityStart、原音及 activityEnd', async () => {
+    vi.stubGlobal('WebSocket', Socket);
+    const complete = vi.fn();
+    const stt = new GeminiBrowserSTT({ onInterim: vi.fn(), onFinal: vi.fn(), onError: vi.fn(), onTurnComplete: complete });
+    expect(stt.startActivity()).toBe(false);
+    const connecting = stt.connect('test-key', [], [], true); Socket.current.onopen?.();
+    expect(JSON.parse(Socket.current.sent[0]).setup.realtimeInputConfig.automaticActivityDetection).toEqual({ disabled: true });
+    Socket.current.onmessage?.({ data: '{"setupComplete":{}}' }); await connecting;
+    expect(stt.startActivity()).toBe(true); stt.sendAudio(new ArrayBuffer(3200)); expect(stt.endActivity()).toBe(true);
+    const messages = Socket.current.sent.slice(1).map(value => JSON.parse(value).realtimeInput);
+    expect(messages[0]).toEqual({ activityStart: {} }); expect(messages[1].audio.mimeType).toBe('audio/pcm;rate=16000');
+    expect(messages[2]).toEqual({ activityEnd: {} });
+    Socket.current.onmessage?.({ data: '{"serverContent":{"turnComplete":true}}' }); await settle();
+    expect(complete).toHaveBeenCalledOnce(); stt.close(); expect(stt.endActivity()).toBe(false);
+  });
   it('保留 Gemini 根據聲音判定的語言代碼，不丟掉純漢字短句的語言資訊', async () => {
     vi.stubGlobal('WebSocket',Socket);
     const onInterim=vi.fn(); const onFinal=vi.fn();

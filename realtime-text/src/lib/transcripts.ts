@@ -34,6 +34,15 @@ export class TranscriptAssembler {
   private lastFinalText = '';
   constructor(private sessionId: string, private direction: Direction, private now = Date.now, private mergeFragments = true) {}
 
+  // Explicit PTT boundaries also preserve an unfinished prior draft instead of overwriting it.
+  beginTurn() {
+    if (this.active.length) {
+      this.recent = [...this.recent, this.active.map(task => task.text).join('')].slice(-2);
+      this.active = []; this.utterance += 1;
+    }
+    this.prefix = ''; this.awaitingNext = false;
+  }
+
   update(input: string, final: boolean, direction: Direction = this.direction, audioLanguage?: Language) {
     const changedLanguage = direction !== this.direction;
     if (this.awaitingNext) {

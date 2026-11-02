@@ -8,6 +8,7 @@ test('continuous capture, recognizer and diagnostics source tests', () => {
     const result = spawnSync(process.execPath, [
         'node_modules/vitest/vitest.mjs', 'run', 'tests/browser-session.test.ts',
         'tests/browser-stt.test.ts', 'tests/recent-audio.test.ts', 'tests/diagnostics.test.ts',
+        'tests/push-to-talk.test.ts', 'tests/talk-hold.test.ts',
     ], { cwd: root, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stdout + result.stderr);
 });

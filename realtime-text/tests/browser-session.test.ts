@@ -6,13 +6,13 @@ import { defaultDirection } from '../src/lib/languages';
 import { twdBudgetToUsd, usdToTwd } from '../src/lib/currency';
 import type { Caption } from '../src/lib/types';
 
-function harness(budgetUsd?: number, context?: string, pair?: LanguagePair, precisionReview = false) {
+function harness(budgetUsd?: number, context?: string, pair?: LanguagePair, precisionReview = false, manual = false) {
   const events: ServerMessage[] = [];
   let audio!: (data: ArrayBuffer) => void;
-  let callbacks!: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onError: (text: string) => void };
+  let callbacks!: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onError: (text: string) => void; onTurnComplete?: () => void };
   let captureError: ((message: string) => void) | undefined;
   const capture = { prepare: vi.fn(async () => {}), start: vi.fn(async (next: typeof audio, onError?: (message: string) => void) => { audio = next; captureError = onError; }), stop: vi.fn(async () => {}) };
-  const stt = { connect: vi.fn(async () => {}), sendAudio: vi.fn(() => true), endAudio: vi.fn(() => callbacks.onFinal('最後一句')), close: vi.fn() };
+  const stt = { connect: vi.fn(async () => {}), sendAudio: vi.fn(() => true), startActivity: vi.fn(() => true), endActivity: vi.fn(() => true), endAudio: vi.fn(() => callbacks.onFinal('最後一句')), close: vi.fn() };
   const translate = vi.fn(async options => {
     options.onUsage('完整提示與前文', '訳文', 10, 2);
     options.onChunk('訳文'); return { text: '訳文' };
@@ -24,7 +24,8 @@ function harness(budgetUsd?: number, context?: string, pair?: LanguagePair, prec
     options.onUsage({ inputTokens: 516, audioTokens: 416, outputTokens: 20, estimated: false });
     return [{ direction: 'zh-ja' as const, original: '停頓之後的小聲新句子', translation: '小さな声' }];
   });
-  const session = new BrowserTranslationSession({ apiKey: 'fake-key', direction: pair ? defaultDirection(pair) : 'zh-ja', pair, mode: 'saving', budgetUsd, context, precisionReview }, event => events.push(event), {
+  const session = new BrowserTranslationSession({ apiKey: 'fake-key', direction: pair ? defaultDirection(pair) : 'zh-ja', pair, mode: 'saving', budgetUsd, context, precisionReview,
+    listeningMode: manual ? 'push-to-talk' : 'automatic' }, event => events.push(event), {
     capture, createSTT: next => { callbacks = next; return stt; }, translate, reviewAudio,
   });
   return { session, events, capture, stt, translate, reviewAudio, get callbacks() { return callbacks; }, audio: (data: ArrayBuffer) => audio(data), captureError: (message: string) => captureError?.(message) };
@@ -32,6 +33,61 @@ function harness(budgetUsd?: number, context?: string, pair?: LanguagePair, prec
 afterEach(() => vi.useRealTimers());
 
 describe('純前端場次生命週期', () => {
+  it('對講機啟動期間與待命只本機收音；按住才依 start → PCM 順序傳送，不重開麥克風', async () => {
+    const h = harness(undefined, undefined, 'zh-ja', false, true); let connected!: () => void;
+    h.stt.connect.mockImplementationOnce(() => new Promise<void>(resolve => { connected = resolve; }));
+    const opening = h.session.start(); await Promise.resolve(); await Promise.resolve();
+    h.audio(new Int16Array(16000).fill(5).buffer); expect(h.session.pressTalk()).toBe(false);
+    expect(h.stt.sendAudio).not.toHaveBeenCalled(); connected(); await opening;
+    expect(h.stt.connect).toHaveBeenCalledWith('fake-key', [], undefined, true);
+    expect(h.session.pressTalk()).toBe(true); expect(h.stt.startActivity).toHaveBeenCalledOnce();
+    expect(h.stt.startActivity.mock.invocationCallOrder[0]).toBeLessThan(h.stt.sendAudio.mock.invocationCallOrder[0]);
+    const bytes = h.stt.sendAudio.mock.calls.reduce((total, call) => total + (call as unknown as [ArrayBuffer])[0].byteLength, 0);
+    expect(bytes).toBe(25600); expect(h.capture.start).toHaveBeenCalledOnce();
+    expect(h.reviewAudio).not.toHaveBeenCalled(); h.session.dispose();
+  });
+
+  it('按住時即時翻譯、放開保留尾音，final 或空白 turnComplete 後才接受下一句', async () => {
+    vi.useFakeTimers(); const h = harness(undefined, undefined, 'zh-ja', false, true); await h.session.start();
+    h.session.pressTalk(); h.audio(new Int16Array(1600).fill(8).buffer); h.callbacks.onInterim('第一句');
+    await vi.advanceTimersByTimeAsync(10); expect(h.translate).toHaveBeenCalled();
+    h.session.releaseTalk(); h.audio(new Int16Array(4800).fill(9).buffer);
+    expect(h.stt.endActivity).toHaveBeenCalledOnce(); expect(h.session.pressTalk()).toBe(false);
+    expect(h.events.filter(event => event.type === 'usage').at(-1)).toMatchObject({ usage: { audioSeconds: .4 } });
+    h.callbacks.onFinal('第一句。', 'cmn-Hans-CN'); expect(h.session.pressTalk()).toBe(true);
+    h.callbacks.onInterim('次の文', 'ja-JP'); h.session.releaseTalk(); h.audio(new Int16Array(4800).buffer);
+    h.callbacks.onTurnComplete?.();
+    expect(h.session.pressTalk()).toBe(true);
+    h.callbacks.onInterim('第三句', 'cmn-Hans-CN');
+    const ids = h.events.filter(event => event.type === 'transcript').map(event => event.captionId);
+    expect(new Set(ids).size).toBe(3); expect(h.stt.endAudio).not.toHaveBeenCalled(); h.session.dispose();
+  });
+
+  it('對講機整場停止使用 activityEnd，收完最後 PCM 與 final，待命停止不產生空請求', async () => {
+    vi.useFakeTimers(); const h = harness(undefined, undefined, 'zh-ja', false, true); await h.session.start();
+    h.session.pressTalk(); h.audio(new Int16Array(1600).fill(8).buffer);
+    h.capture.stop.mockImplementationOnce(async () => { h.audio(new Int16Array([7]).buffer); });
+    h.stt.endActivity.mockImplementation(() => { h.callbacks.onFinal('完整一句。'); return true; });
+    const stopping = h.session.stop(); await vi.advanceTimersByTimeAsync(1600); await stopping;
+    expect(h.stt.endActivity).toHaveBeenCalledOnce(); expect(h.stt.endAudio).not.toHaveBeenCalled();
+    expect(h.events.some(event => event.type === 'status' && event.status === 'stopped')).toBe(true);
+    const idle = harness(undefined, undefined, 'zh-ja', false, true); await idle.session.start();
+    idle.audio(new Int16Array(16000).buffer); await idle.session.stop();
+    expect(idle.stt.startActivity).not.toHaveBeenCalled(); expect(idle.stt.sendAudio).not.toHaveBeenCalled();
+    expect(idle.stt.endActivity).not.toHaveBeenCalled(); expect(idle.stt.endAudio).not.toHaveBeenCalled();
+  });
+
+  it('對講機額外回聽只收到選取原音，待命不送額外 AI，收音錯誤後不再接受按鍵', async () => {
+    const h = harness(undefined, undefined, 'zh-ja', true, true); await h.session.start();
+    h.audio(new Int16Array(16000 * 20).buffer); expect(h.reviewAudio).not.toHaveBeenCalled();
+    h.session.pressTalk(); h.audio(new Int16Array(16000 * 12.2).fill(5).buffer);
+    await Promise.resolve(); await Promise.resolve(); expect(h.reviewAudio).toHaveBeenCalledOnce();
+    expect(h.reviewAudio.mock.calls[0][0].audio.durationSeconds).toBe(13);
+    h.captureError('收音中斷'); expect(h.session.pressTalk()).toBe(false);
+    const requests = h.stt.sendAudio.mock.calls.length; h.session.releaseTalk();
+    expect(h.stt.sendAudio).toHaveBeenCalledTimes(requests);
+  });
+
   it('回聽關閉時長停頓與新句開頭仍持續送音，沒有額外 AI 請求', async () => {
     const h = harness(); await h.session.start();
     h.audio(new Int16Array(16000).fill(300).buffer); h.audio(new Int16Array(16000 * 20).buffer);
