@@ -1,11 +1,13 @@
 import type { ContextCorrection, TranslationResult } from './types';
 import { LANGUAGE_PAIRS, type Language, type LanguagePair } from '../../shared/protocol';
 import { directionFor, isPairLanguage } from './languages';
+import { assertTranslation, plausibleTranslation, strongTextLanguage, TranslationLanguageError } from './translation-language';
 
 export const TRANSLATION_SCHEMA = {
-  type: 'object', propertyOrdering: ['sourceLanguage', 'original', 'translation', 'corrections'],
+  type: 'object', propertyOrdering: ['sourceLanguage', 'targetLanguage', 'original', 'translation', 'corrections'],
   properties: {
     sourceLanguage: { type: 'string', enum: ['zh', 'ja', 'en'], description: 'Main language of CURRENT speech, not of context.' },
+    targetLanguage: { type: 'string', enum: ['zh', 'ja', 'en'], description: 'The OTHER language of the selected pair. ja -> zh means Chinese translation, never Japanese.' },
     original: { type: 'string', description: 'Corrected current speech in its source language; Taiwan Traditional Chinese for Chinese.' },
     translation: { type: 'string', description: 'Only the translation of the corrected current speech.' },
     corrections: { type: 'array', maxItems: 2, items: {
@@ -22,9 +24,11 @@ export const TRANSLATION_SCHEMA = {
 export function translationSchema(pair?: LanguagePair, audioLanguage?: Language) {
   if (!pair) return TRANSLATION_SCHEMA;
   const language = { type: 'string', enum: [...LANGUAGE_PAIRS[pair].languages] };
-  return { ...TRANSLATION_SCHEMA, required: ['sourceLanguage', ...TRANSLATION_SCHEMA.required], properties: {
+  return { ...TRANSLATION_SCHEMA, required: ['sourceLanguage', 'targetLanguage', ...TRANSLATION_SCHEMA.required], properties: {
     ...TRANSLATION_SCHEMA.properties, sourceLanguage: audioLanguage && isPairLanguage(audioLanguage,pair)
       ? {type:'string',enum:[audioLanguage]} : language,
+    targetLanguage: audioLanguage && isPairLanguage(audioLanguage, pair)
+      ? { type: 'string', enum: [directionFor(pair, audioLanguage).slice(3)] } : language,
     corrections: { ...TRANSLATION_SCHEMA.properties.corrections, items: {
       ...TRANSLATION_SCHEMA.properties.corrections.items,
       properties: { ...TRANSLATION_SCHEMA.properties.corrections.items.properties, sourceLanguage: language },
@@ -92,12 +96,18 @@ export function parseTranslationResult(input: string, pair?: LanguagePair, audio
   if (typeof result.original !== 'string' || !result.original.trim()
     || typeof result.translation !== 'string' || !result.translation.trim() || !Array.isArray(result.corrections))
     throw new Error('AI 校對回覆格式不完整，已保留草稿。');
+  if (pair) {
+    const strong = strongTextLanguage(result.original, pair);
+    if (strong && result.sourceLanguage !== strong) throw new TranslationLanguageError();
+    assertTranslation(result.translation, directionFor(pair, result.sourceLanguage as Language), result.targetLanguage);
+  }
   const corrections = result.corrections.filter((item): item is ContextCorrection => Boolean(item && typeof item === 'object'
     && typeof item.captionId === 'string' && Number.isInteger(item.revision)
     && typeof item.original === 'string' && item.original.trim() && item.original.length <= 400
     && typeof item.translation === 'string' && item.translation.trim() && item.translation.length <= 800
     && item.confidence === 'high' && typeof item.evidence === 'string' && item.evidence.trim()
-    && (!pair || isPairLanguage(item.sourceLanguage, pair)))).slice(0, 2);
+    && (!pair || (isPairLanguage(item.sourceLanguage, pair)
+      && plausibleTranslation(item.translation, directionFor(pair, item.sourceLanguage)))))).slice(0, 2);
   return { original: result.original.trim(), text: result.translation.trim(), corrections,
     ...(pair ? {direction:directionFor(pair, result.sourceLanguage as 'zh'|'ja'|'en')} : {}),
   };

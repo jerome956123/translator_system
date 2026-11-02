@@ -2,7 +2,7 @@
 (() => {
   const metrics = { microphoneRequests: 0, modelConnections: 0, translationRequests: 0, reviewRequests: 0, audioPackets: 0,
     silencePackets: 0, quietPackets: 0, reviewWavBytes: [], activityStarts: 0, activityEnds: 0,
-    audioOutsideActivity: 0, sentSeconds: 0, manualActivity: false };
+    audioOutsideActivity: 0, sentSeconds: 0, manualActivity: false, languageRepairs: 0 };
   function report() {
     let node = document.getElementById('qa-metrics');
     if (!node && document.body) {
@@ -53,14 +53,14 @@
         const peak = samples.reduce((value, sample) => Math.max(value, Math.abs(sample)), 0);
         if (!peak) metrics.silencePackets++;
         else if (peak < 50) metrics.quietPackets++;
-        if((this.manual ? this.turnPackets : this.packets)===4) this.message({serverContent:{interimInputTranscription:{text:this.manual?'第一個字也有保留':'下周二去庆生',languageCode:'cmn-Hans-CN'}}});
+        if((this.manual ? this.turnPackets : this.packets)===4) this.message({serverContent:{interimInputTranscription:{text:this.manual?'来週は青森に行きます':'下周二去庆生',languageCode:'cmn-Hans-CN'}}});
         if(!this.manual && this.packets===9) this.message({serverContent:{inputTranscription:{text:'下周二去庆生。',languageCode:'cmn-Hans-CN'}}});
         report();
       }
       if (message.realtimeInput?.activityEnd) {
         this.active = false; metrics.activityEnds++; report();
         queueMicrotask(() => this.message({serverContent:{inputTranscription:{
-          text:metrics.activityEnds===1?'第一個字也有保留。':'第二句也完整。',languageCode:'cmn-Hans-CN'},turnComplete:true}}));
+          text:'来週は青森に行きます。',languageCode:'cmn-Hans-CN'},turnComplete:true}}));
       }
     }
     close() { this.readyState=3; this.onclose?.({code:1000,reason:''}); }
@@ -72,11 +72,12 @@
     if (String(url).endsWith(':generateContent')) {
       metrics.reviewRequests++;
       const body = JSON.parse(options.body);
+      if (body.contents[0].parts[0].text.includes('LANGUAGE REPAIR')) metrics.languageRepairs++;
       const data = body.contents[0].parts.find(part => part.inlineData).inlineData.data;
       metrics.reviewWavBytes.push(atob(data).length); report();
-      const segments = metrics.reviewRequests === 1 ? [
-        {sourceLanguage:'zh',original:'下周二去青森。停顿后这一句也有收进来。',translation:'来週火曜日に青森へ行きます。間を置いた後のこの一文も録音されています。'},
-        {sourceLanguage:'ja',original:'声が小さくても聞こえますか。',translation:'声音小一点也听得到吗？'},
+      const segments = metrics.reviewRequests <= 2 ? [
+        {sourceLanguage:'ja',targetLanguage:'zh',original:'来週は青森に行きます。',translation:metrics.reviewRequests===1?'来週は青森に行きます。':'下周要去青森。'},
+        {sourceLanguage:'zh',targetLanguage:'ja',original:'我想去弘前城。',translation:'弘前城に行きたいです。'},
       ] : [];
       return new Response(JSON.stringify({candidates:[{content:{parts:[{text:JSON.stringify({segments})}]},finishReason:'STOP'}],
         usageMetadata:{promptTokenCount:816,candidatesTokenCount:90,promptTokensDetails:[{modality:'AUDIO',tokenCount:416},{modality:'TEXT',tokenCount:400}]}}),
@@ -84,9 +85,12 @@
     }
     metrics.translationRequests++; report();
     const prompt = JSON.parse(options.body).contents[0].parts[0].text;
-    const current = JSON.parse(prompt.split('DATA: ').at(-1)).current;
-    const result = {sourceLanguage:'zh',original:metrics.manualActivity?current:'下週二去青森。',
-      translation:metrics.manualActivity?'最初の文字も含めて翻訳しています。':'来週火曜日に青森へ行きます。',corrections:[]};
+    const current = JSON.parse(prompt.split('\nDATA: ').at(-1).split('\nLANGUAGE REPAIR:')[0]).current;
+    if (prompt.includes('LANGUAGE REPAIR')) metrics.languageRepairs++;
+    const result = metrics.manualActivity ? {sourceLanguage:'ja',targetLanguage:'zh',original:current,
+      translation:metrics.translationRequests===1?'来週は青森に行きます。':'下週要去青森。',corrections:[]}
+      : {sourceLanguage:'zh',targetLanguage:'ja',original:'下週二去青森。',translation:'来週火曜日に青森へ行きます。',corrections:[]};
+    report();
     const event = {candidates:[{content:{parts:[{text:JSON.stringify(result)}]},finishReason:'STOP'}],
       usageMetadata:{promptTokenCount:100,candidatesTokenCount:20}};
     return new Response('data: '+JSON.stringify(event)+'\n\n',{headers:{'Content-Type':'text/event-stream'}});

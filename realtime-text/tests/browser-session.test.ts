@@ -33,6 +33,12 @@ function harness(budgetUsd?: number, context?: string, pair?: LanguagePair, prec
 afterEach(() => vi.useRealTimers());
 
 describe('純前端場次生命週期', () => {
+  it('日文假名與錯誤中文語音標記矛盾時，不把錯誤標記強制交給翻譯模型', async () => {
+    vi.useFakeTimers(); const h = harness(undefined, undefined, 'zh-ja'); await h.session.start();
+    h.callbacks.onInterim('来週は青森に行きます。', 'cmn-Hans-CN'); await vi.advanceTimersByTimeAsync(5);
+    const task = h.translate.mock.calls[0][0];
+    expect(task.audioLanguage).toBeUndefined(); expect(task.direction).toBe('ja-zh'); h.session.dispose();
+  });
   it('對講機啟動期間與待命只本機收音；按住才依 start → PCM 順序傳送，不重開麥克風', async () => {
     const h = harness(undefined, undefined, 'zh-ja', false, true); let connected!: () => void;
     h.stt.connect.mockImplementationOnce(() => new Promise<void>(resolve => { connected = resolve; }));

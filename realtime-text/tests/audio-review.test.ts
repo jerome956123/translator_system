@@ -17,6 +17,12 @@ function respond(segments: unknown[] = [], metadata?: unknown, finishReason = 'S
 afterEach(() => vi.unstubAllGlobals());
 
 describe('直接原音回聽與額外費用', () => {
+  it('不接受假裝是中文的日文譯文，並在 schema 中要求目標語言', async () => {
+    respond([{ sourceLanguage: 'ja', targetLanguage: 'zh', original: '青森に行きます。', translation: '青森に行きます。' }]);
+    await expect(reviewAudio(options())).rejects.toThrow('目標');
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(body.generationConfig.responseJsonSchema.properties.segments.items.required).toContain('targetLanguage');
+  });
   it('傳送實際 WAV（含安靜樣本），不依賴辨識稿；開關外不增加錄音裝置', async () => {
     respond([{ sourceLanguage: 'zh', original: '下周二去青森。', translation: '来週火曜日に青森へ行きます。' }]);
     const o = options(); const result = await reviewAudio(o);

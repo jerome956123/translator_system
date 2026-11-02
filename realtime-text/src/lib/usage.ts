@@ -7,10 +7,14 @@ export function estimateTokens(text: string) { return Math.ceil(text.length); }
 
 export class UsageTracker {
   private audioBytes = 0;
+  private sttBytes = 0;
   private attempts = new Map<string, { input: number; output: number; estimated: boolean }>();
   private reviews = new Map<string, ReviewUsage & { seconds: number }>();
 
-  addAudioBytes(bytes: number) { this.audioBytes += Math.max(0, bytes); }
+  addAudioBytes(bytes: number, billSTT = true) {
+    this.audioBytes += Math.max(0, bytes);
+    if (billSTT) this.sttBytes += Math.max(0, bytes);
+  }
   recordReview(requestId: string, seconds: number, usage: ReviewUsage) {
     this.reviews.set(requestId, { ...usage, seconds });
   }
@@ -42,7 +46,7 @@ export class UsageTracker {
     }
     return {
       audioSeconds, translationRequests: this.attempts.size, inputTokens, outputTokens,
-      estimatedUsd: audioSeconds / 60 * PRICES.sttPerMinute
+      estimatedUsd: this.sttBytes / 32000 / 60 * PRICES.sttPerMinute
         + [...this.attempts.values()].reduce((total, item) => total
           + item.input / 1e6 * PRICES.textInputPerMillion + item.output / 1e6 * PRICES.textOutputPerMillion, 0)
         + reviewEstimatedUsd,

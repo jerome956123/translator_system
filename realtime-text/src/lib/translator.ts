@@ -4,11 +4,12 @@ import type { ReviewCaption, TranslationResult } from './types';
 import { translationSchema, streamedTranslation, streamedSourceLanguage, parseTranslationResult } from './structured';
 import { sourceText, translatedText } from './chinese';
 import { directionFor, isPairLanguage } from './languages';
+import { plausibleTranslation, TranslationLanguageError } from './translation-language';
 
 export function translationPrompt(text: string, context: string, direction: Direction,
   review: ReviewCaption[] = [], following = '', vocabulary: string[] = [], pair?: LanguagePair, audioLanguage?: Language) {
   const route = pair ? `BIDIRECTIONAL pair: ${LANGUAGE_PAIRS[pair].label}.
-For EVERY request detect the main spoken language of CURRENT speech and output sourceLanguage as ${LANGUAGE_PAIRS[pair].languages.join(' or ')}. Translate into the OTHER language of this pair. Never keep a fixed direction from earlier turns or translate into the detected source language.
+For EVERY request detect the main spoken language of CURRENT speech and output sourceLanguage as ${LANGUAGE_PAIRS[pair].languages.join(' or ')}. Also output targetLanguage, the OTHER language of this pair. Routing: ${LANGUAGE_PAIRS[pair].languages.map(source => `${source} -> ${directionFor(pair, source).slice(3)}`).join('; ')}. The translation field MUST be in targetLanguage, never a copy of the Japanese original when the target is Chinese. Never keep a fixed direction from earlier turns or translate into the detected source language.
 Context may be in either language. Use it to disambiguate, but detect CURRENT independently. Loanwords, proper names, and occasional foreign words do not by themselves change the main language. For mixed speech choose its dominant language and preserve the whole meaning.
 For REVIEW corrections also output each caption's own sourceLanguage and translate it to its opposite language; review captions can have different directions.`
     : `Source: ${DIRECTIONS[direction].sourceLabel}; target: ${DIRECTIONS[direction].targetLabel}.`;
@@ -36,17 +37,33 @@ interface Options {
   vocabulary?: string[];
   signal: AbortSignal;
   onChunk: (text: string, direction?: Direction) => void;
-  onUsage: (input: string, output: string, inputTokens?: number, outputTokens?: number) => void;
+  onUsage: (input: string, output: string, inputTokens?: number, outputTokens?: number, attempt?: number) => void;
 }
 
 export async function streamTranslation(options: Options): Promise<TranslationResult> {
-  const prompt = translationPrompt(options.text, options.context, options.direction, options.review, options.following, options.vocabulary, options.pair, options.audioLanguage);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await streamTranslationAttempt({ ...options, onUsage: (input, output, i, o) => {
+        if (attempt) options.onUsage(input, output, i, o, attempt);
+        else options.onUsage(input, output, i, o);
+      } }, attempt > 0);
+    } catch (error) {
+      if (!(error instanceof TranslationLanguageError) || attempt || options.signal.aborted) throw error;
+    }
+  }
+  throw new TranslationLanguageError();
+}
+
+async function streamTranslationAttempt(options: Options, languageRetry: boolean): Promise<TranslationResult> {
+  const prompt = translationPrompt(options.text, options.context, options.direction, options.review, options.following, options.vocabulary, options.pair, options.audioLanguage)
+    + (languageRetry ? '\nLANGUAGE REPAIR: The prior response used the wrong translation language. Re-detect CURRENT independently; return sourceLanguage and the opposite targetLanguage. Japanese speech must become Taiwan Traditional Chinese in a zh-ja pair. Do not copy the original into translation.' : '');
   let text = '';
   let inputTokens: number | undefined;
   let outputTokens: number | undefined;
   let finishReason = '';
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   options.onUsage(prompt, text);
+  options.signal.throwIfAborted();
   try {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODELS.translation}:streamGenerateContent?alt=sse`, {
       method: 'POST', signal: options.signal,
@@ -83,8 +100,10 @@ export async function streamTranslation(options: Options): Promise<TranslationRe
           && (!options.audioLanguage || language === options.audioLanguage)))) {
           const direction = options.pair ? directionFor(options.pair, language as 'zh'|'ja'|'en') : options.direction;
           const localized = translatedText(translation, direction);
-          if (options.pair) options.onChunk(localized, direction);
-          else options.onChunk(localized);
+          if (plausibleTranslation(localized, direction)) {
+            if (options.pair) options.onChunk(localized, direction);
+            else options.onChunk(localized);
+          }
         }
       }
       finishReason = candidate?.finishReason ?? finishReason;

@@ -60,6 +60,7 @@ export interface SessionSettings {
 }
 
 export interface Caption {
+  origin?: 'precision' | 'live';
   id: string;
   sessionId: string;
   direction: Direction;

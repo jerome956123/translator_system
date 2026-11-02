@@ -13,6 +13,7 @@ import { directionSource, directionFor, isPairLanguage, languageFromCode, previe
 import { PrecisionReviewer } from './precision-review';
 import { reviewAudio, reviewCost } from './audio-review';
 import { PushToTalkGate } from '../audio/push-to-talk';
+import { plausibleTranslation, strongTextLanguage } from './translation-language';
 
 interface Capture {
   prepare: () => Promise<void>;
@@ -96,13 +97,14 @@ export class BrowserTranslationSession {
       prepareTask: task => this.prepareTranslation(task),
       translate: (task, requestId, onChunk, signal) => (dependencies.translate ?? streamTranslation)({
         ...task, apiKey: settings.apiKey, signal, onChunk,
-        onUsage: (input, output, inputTokens, outputTokens) => {
-          this.usage.record(requestId, input, output, inputTokens, outputTokens);
+        onUsage: (input, output, inputTokens, outputTokens, attempt = 0) => {
+          this.usage.record(attempt ? `${requestId}-repair-${attempt}` : requestId, input, output, inputTokens, outputTokens);
           this.sendUsage(); this.budget();
         },
       }),
       onTranslation: (task, requestId, text, complete, detectedDirection) => {
         const direction = detectedDirection ?? task.direction;
+        if (!plausibleTranslation(text, direction)) return;
         const localized = translatedText(text, direction);
         this.edited.set(task.captionId, { original: this.edited.get(task.captionId)?.original ?? sourceText(task.text, direction), translation: localized, direction });
         this.send({ type: 'translation', sessionId: this.id, captionId: task.captionId, revision: task.revision,
@@ -155,7 +157,7 @@ export class BrowserTranslationSession {
   }
 
   private applyEdit(task: TranslationTask, original: string, translation: string, direction: Direction) {
-    if (!original.trim() || !translation.trim()) return;
+    if (!original.trim() || !translation.trim() || !plausibleTranslation(translation, direction)) return;
     const localized = { original: sourceText(original.trim(), direction),
       translation: translatedText(translation.trim(), direction), direction };
     this.edited.set(task.captionId, localized);
@@ -267,7 +269,9 @@ export class BrowserTranslationSession {
     this.warnedNoTranscript = false;
     const detected = languageFromCode(languageCode);
     if (this.settings.pair && isPairLanguage(detected, this.settings.pair)) this.speechAudioLanguage = detected;
-    const audioLanguage = this.settings.pair ? this.speechAudioLanguage : undefined;
+    const strong = this.settings.pair ? strongTextLanguage(text, this.settings.pair) : undefined;
+    // Contradictory script evidence must not force an incorrect ASR language into the text model.
+    const audioLanguage = this.settings.pair && (!strong || strong === this.speechAudioLanguage) ? this.speechAudioLanguage : undefined;
     const direction = this.settings.pair
       ? audioLanguage ? directionFor(this.settings.pair, audioLanguage) : previewDirection(text, this.settings.pair, this.previousLanguage)
       : this.settings.direction;

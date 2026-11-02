@@ -16,7 +16,7 @@ export function captionHistory(items: Caption[], action: Action): Caption[] {
     if (!existing) return [...items, {
       id: event.captionId, sessionId: event.sessionId, direction: event.direction ?? direction, receivedAt: event.receivedAt,
       paragraphId: event.paragraphId ?? event.captionId, revision: event.revision,
-      original: event.text, rawOriginal: event.rawText ?? event.text, translation: '', translationRevision: 0,
+      origin: event.origin, original: event.text, rawOriginal: event.rawText ?? event.text, translation: '', translationRevision: 0,
       originalFinal: event.final, translationFinal: false, corrected: false,
     }];
     if (existing.revision > event.revision) return items;

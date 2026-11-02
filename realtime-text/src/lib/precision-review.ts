@@ -3,6 +3,7 @@ import { RecentAudio } from '../audio/recent-audio';
 import { reviewAudio, REVIEW_SECONDS, type ReviewInput, type ReviewUsage } from './audio-review';
 import { readableError, redactKey } from './config';
 import type { SessionSettings } from './types';
+import { TranslationLanguageError } from './translation-language';
 
 /** Independent of ASR/VAD. Every sample, including silence and quiet onsets, reaches this pass. */
 export class PrecisionReviewer {
@@ -19,6 +20,7 @@ export class PrecisionReviewer {
     emit: (event: ServerMessage) => void;
     beforeRequest: (usage: ReviewUsage) => boolean;
     onUsage: (id: string, seconds: number, usage: ReviewUsage) => void;
+    onError?: (message: string) => void;
   }, private request = reviewAudio) {}
 
   private status(state: 'waiting' | 'working' | 'stopped' | 'error', message: string) {
@@ -39,7 +41,7 @@ export class PrecisionReviewer {
 
   private enqueue(end: number, clipEnd: number) {
     // One in flight, at most two waiting clips. Never silently skip an unreviewed interval.
-    if (this.queue.length >= 2) { this.error('回聽速度跟不上收音，已暫停回聽；即時字幕繼續。請停止後重新開始再試。'); return; }
+    if (this.queue.length >= 2) { this.error('原音翻譯速度跟不上收音，已暫停新請求。請停止後重新開始再試。'); return; }
     const audio = this.audio.snapshot(Math.max(0, this.nextStart - 2), clipEnd);
     if (!audio) return;
     this.queue.push({ audio, startSeconds: this.nextStart, endSeconds: end });
@@ -59,17 +61,26 @@ export class PrecisionReviewer {
       const timeout = setTimeout(() => controller.abort(new Error('精準回聽超過 20 秒沒有回覆。')), 20000);
       this.status('working', `正在回聽 ${Math.floor(input.startSeconds)}–${Math.floor(input.endSeconds)} 秒原音…`);
       try {
-        const segments = await this.request({ ...input, settings: this.settings, signal: controller.signal,
-          beforeRequest: usage => !this.closed && !this.failed && this.callbacks.beforeRequest(usage),
-          onUsage: usage => { if (!this.closed && !this.failed) this.callbacks.onUsage(id, input.audio.durationSeconds, usage); },
-        });
+        let segments: PrecisionWindow['segments'] = [];
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            segments = await this.request({ ...input, settings: this.settings, signal: controller.signal, languageRetry: attempt > 0,
+              beforeRequest: usage => !this.closed && !this.failed && this.callbacks.beforeRequest(usage),
+              onUsage: usage => { if (!this.closed && !this.failed) this.callbacks.onUsage(attempt ? `${id}-repair` : id, input.audio.durationSeconds, usage); },
+            });
+            break;
+          } catch (error) {
+            if (!(error instanceof TranslationLanguageError) || attempt || controller.signal.aborted || this.closed) throw error;
+            this.status('working', '譯文語言不符，正在重新翻譯這段原音…');
+          }
+        }
         if (this.closed || this.failed) return;
         const window: PrecisionWindow = { id, sessionId: this.sessionId, startSeconds: input.startSeconds,
           endSeconds: input.endSeconds, segments };
         this.callbacks.emit({ type: 'precision-result', sessionId: this.sessionId, window });
       } catch (error) {
         if (!this.closed && !this.failed) this.error(controller.signal.aborted
-          ? '精準回聽逾時；已暫停回聽，即時字幕繼續。' : redactKey(readableError(error), this.settings.apiKey));
+          ? '原音翻譯逾時，已暫停新請求。' : redactKey(readableError(error), this.settings.apiKey));
       } finally { clearTimeout(timeout); if (this.controller === controller) this.controller = undefined; }
     }
     if (!this.failed && !this.closed) this.status(this.finishing ? 'stopped' : 'waiting', this.finishing
@@ -78,7 +89,8 @@ export class PrecisionReviewer {
 
   private error(message: string) {
     this.failed = true; this.queue = []; this.audio.clear(); this.controller?.abort();
-    this.status('error', `${message} 未完成部分請參考即時字幕或保留原音。`);
+    const description = `${message} 這段尚未完成，請保留原音並重新開始。`;
+    this.status('error', description); this.callbacks.onError?.(description);
   }
 
   async finish() {

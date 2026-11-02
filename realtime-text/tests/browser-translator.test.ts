@@ -8,6 +8,31 @@ function options() { return { apiKey: 'fake-private-key', text: '你好', contex
   signal: new AbortController().signal, onChunk: vi.fn(), onUsage: vi.fn() }; }
 
 describe('瀏覽器 SSE 文字串流與費用', () => {
+  it('日文原文被直接放進中文譯文時，不顯示錯誤語言，重譯一次且兩次費用分開記錄', async () => {
+    const wrong = { sourceLanguage: 'ja', targetLanguage: 'zh', original: '来週は青森に行きます。', translation: '来週は青森に行きます。', corrections: [] };
+    const correct = { ...wrong, translation: '下週要去青森。' };
+    const request = vi.fn(async (_url: string | URL | Request, _options?: RequestInit) => {
+      const result = request.mock.calls.length === 1 ? wrong : correct;
+      return new Response('data: '+JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(result) }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 10 } })+'\n\n');
+    }); vi.stubGlobal('fetch', request);
+    const tracker = new UsageTracker();
+    const o = { ...options(), text: wrong.original, pair: 'zh-ja' as const, audioLanguage: 'ja' as const };
+    o.onUsage.mockImplementation((input, output, i, out, attempt = 0) => tracker.record(`attempt-${attempt}`, input, output, i, out));
+    const result = await streamTranslation(o);
+    expect(result.text).toBe('下週要去青森。'); expect(request).toHaveBeenCalledTimes(2);
+    expect(o.onChunk.mock.calls.every(call => !call[0].includes('行きます'))).toBe(true);
+    expect(tracker.snapshot().translationRequests).toBe(2);
+    expect(JSON.parse(request.mock.calls[1][1]!.body as string).contents[0].parts[0].text).toContain('LANGUAGE REPAIR');
+  });
+
+  it('重譯仍是日文時停止，不標記成功，也不無限重試', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('data: '+JSON.stringify({ candidates: [{
+      content: { parts: [{ text: JSON.stringify({ sourceLanguage: 'ja', targetLanguage: 'zh', original: '青森に行きます。', translation: '青森に行きます。', corrections: [] }) }] }, finishReason: 'STOP',
+    }] })+'\n\n')));
+    const o = { ...options(), pair: 'zh-ja' as const, audioLanguage: 'ja' as const };
+    await expect(streamTranslation(o)).rejects.toThrow('目標');
+    expect(fetch).toHaveBeenCalledTimes(2); expect(o.onChunk).not.toHaveBeenCalled();
+  });
   it('回覆方向與語音標記衝突時，不先顯示反方向的串流譯文', async () => {
     const json=JSON.stringify({sourceLanguage:'zh',original:'青森大学',translation:'青森大學',corrections:[]});
     vi.stubGlobal('fetch',vi.fn(async()=>new Response('data: '+JSON.stringify({candidates:[{

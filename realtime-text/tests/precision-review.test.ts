@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PrecisionReviewer } from '../src/lib/precision-review';
 import type { reviewAudio } from '../src/lib/audio-review';
 import type { ServerMessage } from '../shared/protocol';
+import { TranslationLanguageError } from '../src/lib/translation-language';
 
 const pcm = (seconds: number, value = 0) => new Int16Array(seconds * 16000).fill(value).buffer;
 function harness(request?: typeof reviewAudio) {
@@ -17,6 +18,25 @@ function harness(request?: typeof reviewAudio) {
 afterEach(() => vi.useRealTimers());
 
 describe('回聽不受 VAD／即時文字影響', () => {
+  it('語言錯誤只重試一次，每次請求分別計費，修正完成才加入結果', async () => {
+    let attempts = 0;
+    const h = harness(async options => {
+      options.onUsage({ inputTokens: 100, audioTokens: 80, outputTokens: 10, estimated: false });
+      if (!attempts++) throw new TranslationLanguageError();
+      expect(options.languageRetry).toBe(true);
+      return [{ direction: 'ja-zh', original: '青森に行きます。', translation: '要去青森。' }];
+    }); h.reviewer.append(pcm(13));
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    expect(h.query).toHaveBeenCalledTimes(2); expect(h.callbacks.onUsage).toHaveBeenCalledTimes(2);
+    expect(new Set(h.callbacks.onUsage.mock.calls.map(call => call[0])).size).toBe(2);
+    expect(h.events.filter(event => event.type === 'precision-result')).toHaveLength(1); h.reviewer.close();
+  });
+  it('兩次都是錯誤語言時明確失敗，不保留假的成功結果', async () => {
+    const h = harness(async () => { throw new TranslationLanguageError(); }); h.reviewer.append(pcm(13));
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    expect(h.query).toHaveBeenCalledTimes(2); expect(h.events.some(event => event.type === 'precision-result')).toBe(false);
+    expect(h.events.some(event => event.type === 'precision-status' && event.state === 'error')).toBe(true); h.reviewer.close();
+  });
   it('長停頓後的小聲開頭也完整送出，固定區間有前後文且目標不重疊', async () => {
     const h = harness();
     h.reviewer.append(pcm(10)); h.reviewer.append(pcm(3, 4)); await Promise.resolve();
