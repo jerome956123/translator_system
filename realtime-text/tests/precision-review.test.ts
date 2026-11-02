@@ -9,7 +9,7 @@ function harness(request?: typeof reviewAudio) {
   const events: ServerMessage[] = [];
   const query = vi.fn(request ?? (async options => {
     if (!options.beforeRequest({ inputTokens: 100, audioTokens: 80, outputTokens: 10, estimated: true })) throw new Error('預算不足');
-    return [{ direction: 'zh-ja' as const, original: '小聲也有收錄', translation: '小さな声' }];
+    return { segments: [{ direction: 'zh-ja' as const, original: '小聲也有收錄', translation: '小さな声' }] };
   }));
   const callbacks = { emit: (event: ServerMessage) => events.push(event), beforeRequest: vi.fn(() => true), onUsage: vi.fn() };
   const reviewer = new PrecisionReviewer('session', { apiKey: 'fake', direction: 'zh-ja', pair: 'zh-ja', mode: 'saving' }, callbacks, query);
@@ -24,7 +24,7 @@ describe('回聽不受 VAD／即時文字影響', () => {
       options.onUsage({ inputTokens: 100, audioTokens: 80, outputTokens: 10, estimated: false });
       if (!attempts++) throw new TranslationLanguageError();
       expect(options.languageRetry).toBe(true);
-      return [{ direction: 'ja-zh', original: '青森に行きます。', translation: '要去青森。' }];
+      return { segments: [{ direction: 'ja-zh', original: '青森に行きます。', translation: '要去青森。' }] };
     }); h.reviewer.append(pcm(13));
     for (let i = 0; i < 6; i++) await Promise.resolve();
     expect(h.query).toHaveBeenCalledTimes(2); expect(h.callbacks.onUsage).toHaveBeenCalledTimes(2);
@@ -52,7 +52,7 @@ describe('回聽不受 VAD／即時文字影響', () => {
   });
 
   it('純安靜仍回聽，不會因沒達音量門檻或沒有原文而跳過', async () => {
-    const h = harness(async () => []); h.reviewer.append(pcm(13)); await Promise.resolve(); await Promise.resolve();
+    const h = harness(async () => ({ segments: [] })); h.reviewer.append(pcm(13)); await Promise.resolve(); await Promise.resolve();
     expect(h.query).toHaveBeenCalledOnce();
     expect(h.events.find(event => event.type === 'precision-result')).toMatchObject({ window: { segments: [] } });
     h.reviewer.close();
@@ -70,7 +70,7 @@ describe('回聽不受 VAD／即時文字影響', () => {
 
   it('一次只送一個請求；排隊超限時明確暫停而非默默跳掉音訊', async () => {
     let release!: () => void;
-    const h = harness(() => new Promise(resolve => { release = () => resolve([]); }));
+    const h = harness(() => new Promise(resolve => { release = () => resolve({ segments: [] }); }));
     h.reviewer.append(pcm(13)); h.reviewer.append(pcm(12)); h.reviewer.append(pcm(12));
     expect(h.query).toHaveBeenCalledOnce(); h.reviewer.append(pcm(12));
     expect(h.events.some(event => event.type === 'precision-status' && event.state === 'error' && event.message.includes('跟不上'))).toBe(true);
@@ -93,7 +93,7 @@ describe('回聽不受 VAD／即時文字影響', () => {
     h.reviewer.append(pcm(13)); await vi.advanceTimersByTimeAsync(20001); expect(aborted).toBe(true);
     expect(h.events.some(event => event.type === 'precision-status' && event.state === 'error')).toBe(true); h.reviewer.close();
     let release!: () => void;
-    const late = harness(() => new Promise(resolve => { release = () => resolve([]); }));
+    const late = harness(() => new Promise(resolve => { release = () => resolve({ segments: [] }); }));
     late.reviewer.append(pcm(13)); late.reviewer.close(); const count = late.events.length;
     release(); await Promise.resolve(); await Promise.resolve(); expect(late.events).toHaveLength(count);
   });

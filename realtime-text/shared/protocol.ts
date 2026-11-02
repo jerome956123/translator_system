@@ -32,6 +32,7 @@ export interface PrecisionWindow {
   startSeconds: number;
   endSeconds: number;
   segments: PrecisionSegment[];
+  revision?: number;
 }
 
 export type ClientMessage =

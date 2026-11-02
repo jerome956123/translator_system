@@ -22,7 +22,7 @@ function harness(budgetUsd?: number, context?: string, pair?: LanguagePair, prec
     if (!options.beforeRequest(estimate)) throw new Error('本場剩餘預算不足');
     options.onUsage(estimate);
     options.onUsage({ inputTokens: 516, audioTokens: 416, outputTokens: 20, estimated: false });
-    return [{ direction: 'zh-ja' as const, original: '停頓之後的小聲新句子', translation: '小さな声' }];
+    return { segments: [{ direction: 'zh-ja' as const, original: '停頓之後的小聲新句子', translation: '小さな声' }] };
   });
   const session = new BrowserTranslationSession({ apiKey: 'fake-key', direction: pair ? defaultDirection(pair) : 'zh-ja', pair, mode: 'saving', budgetUsd, context, precisionReview,
     listeningMode: manual ? 'push-to-talk' : 'automatic' }, event => events.push(event), {

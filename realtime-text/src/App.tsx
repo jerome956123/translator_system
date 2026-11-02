@@ -13,6 +13,7 @@ import { EXCHANGE_RATE_DATE, EXCHANGE_RATE_SOURCE, formatTwd, twdBudgetToUsd, us
 import { recognitionText, exportComparison, audioTime } from './lib/diagnostics';
 import { PrecisionTranslationSession } from './lib/precision-session';
 import { PushToTalkButton } from './PushToTalkButton';
+import { watchPageInactivity } from './lib/page-inactivity';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped' | 'error';
 const LABEL: Record<Status, string> = {
@@ -168,6 +169,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!running || manual) return;
+    const current = session.current;
+    if (!current) return;
+    return watchPageInactivity(document, () => {
+      if (session.current !== current || !['connecting', 'ready', 'listening'].includes(statusRef.current)) return;
+      // Cancel immediately: inactivity must not enqueue a fresh paid request for the remaining audio.
+      current.dispose();
+      setRecentAudioSeconds(current.recentAudioSeconds);
+      changeStatus('stopped');
+      setMessage('已暫停：本頁超過 1 小時沒有操作。紀錄已保留，按「繼續翻譯」可恢復。');
+      void wakeLock.current?.release().catch(() => {});
+    }, window);
+  }, [running, manual]);
+
+  useEffect(() => {
     const pane = captionPane.current;
     if (pane && followBottom.current) pane.scrollTop = pane.scrollHeight;
   }, [captions]);
@@ -252,7 +268,7 @@ export default function App() {
       </select></label>
       <label>本場預算上限（台幣）<input value={budget} disabled={running} inputMode="decimal" placeholder="NT$，留空不限制" onChange={event => setBudget(event.target.value)} /></label>
       <div className="main-actions">
-        <button className="primary" disabled={running || !apiKey.trim() || !secure || !supported} onClick={start}>● {manual ? captions.length ? '繼續待命' : '開始待命' : captions.length ? '繼續翻譯' : '開始翻譯'}</button>
+        <button className="primary" disabled={running || !apiKey.trim() || !secure || !supported} onClick={start}>● {manual ? captions.length ? '繼續待命' : '開始待命' : captions.length || status === 'stopped' ? '繼續翻譯' : '開始翻譯'}</button>
         <button className="stop" disabled={!running || status === 'finishing'} onClick={() => void session.current?.stop()}>■ 停止</button>
       </div>
     </section>
@@ -261,7 +277,7 @@ export default function App() {
         onPress={() => session.current instanceof BrowserTranslationSession && session.current.pressTalk()}
         onRelease={() => { if (session.current instanceof BrowserTranslationSession) session.current.releaseTalk(); }} />
       <small>先按「開始待命」，再按住空白鍵或按鈕說話；按住時邊說邊顯示文字，放開結束這句。保留按下前最多 0.8 秒及放開後約 0.3 秒原音。</small>
-    </section> : <p className="mode-hint">直接使用精準回聽的原音翻譯，每約 12 秒分批顯示；首次約等 13 秒加上 AI 處理時間。此模式只跑原音翻譯，不另外跑即時字幕。</p>}
+    </section> : <p className="mode-hint">持續收音，約 12–20 秒優先在停頓處分段，再等 3 秒後文交給 AI。下一段會重聽前段並校對，最新譯文可能更新；重聽用量計入費用。本頁 1 小時無操作會暫停，按「繼續翻譯」恢復。</p>}
     {audioSource === 'display' && <p className="source-hint">按開始後選擇正在播放的分頁，勾選「分享分頁音訊」。分享視窗或整個螢幕時也必須包含音訊；只傳聲音，不傳畫面。</p>}
     <div className="settings-row"><details className="recognition-settings"><summary>收音與辨識設定（選填）</summary>
       <label htmlFor="vocabulary">常用詞：姓名、地名或專有名詞</label>
@@ -335,12 +351,12 @@ export default function App() {
     </section>
     <section className="usage-grid" aria-label="清除紀錄前的累計用量與費用">
       <div><span>累計處理音訊</span><strong>{usage.audioSeconds.toFixed(1)} 秒</strong></div>
-      <div><span>累計翻譯請求</span><strong>{usage.translationRequests + (usage.reviewRequests ?? 0)}</strong>{Boolean(usage.reviewRequests) && <small>含 {usage.reviewRequests} 次原音翻譯 · {usage.reviewAudioSeconds?.toFixed(1)} 秒（含邊界參考及語言重試）</small>}</div>
+      <div><span>累計翻譯請求</span><strong>{usage.translationRequests + (usage.reviewRequests ?? 0)}</strong>{Boolean(usage.reviewRequests) && <small>含 {usage.reviewRequests} 次原音翻譯 · {usage.reviewAudioSeconds?.toFixed(1)} 秒（含前後文重聽及語言重試）</small>}</div>
       <div><span>累計輸入／輸出 Tokens{usage.tokenEstimate ? '（估算）' : ''}</span><strong>{usage.inputTokens ?? '未知'} / {usage.outputTokens ?? '未知'}</strong></div>
       <div><span>累計估算費用（台幣）</span><strong>{formatTwd(usdToTwd(usage.estimatedUsd, displayRate))}</strong>
         <small>US$1 ≈ NT${displayRate.toLocaleString('zh-TW', {maximumFractionDigits:4})}</small></div>
     </section>
     {Boolean(usage.reviewRequests) && <p className="precision-cost">總額已含原音翻譯 {formatTwd(usdToTwd(usage.reviewEstimatedUsd ?? 0, displayRate))}。請求進行中先顯示保守估算，再依用量更新；失敗與語言重試也可能計費。</p>}
-    <footer>版本 2.7.0 · 精準原音翻譯／空白鍵即時翻譯 · 重新整理會清除翻譯、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
+    <footer>版本 2.8.0 · 精準原音翻譯／空白鍵即時翻譯 · 重新整理會清除翻譯、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
   </main>;
 }

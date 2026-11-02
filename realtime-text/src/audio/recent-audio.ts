@@ -5,7 +5,7 @@ export interface AudioSnapshot {
   endSeconds: number;
 }
 
-/** The last 30 seconds of the same PCM16 mono audio sent to the recognizer.
+/** A bounded recent interval of the same PCM16 mono audio (30 seconds by default).
  * Stored only in this page's memory; no second recording device or AI request.
  */
 export class RecentAudio {

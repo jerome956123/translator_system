@@ -2,7 +2,8 @@
 (() => {
   const metrics = { microphoneRequests: 0, modelConnections: 0, translationRequests: 0, reviewRequests: 0, audioPackets: 0,
     silencePackets: 0, quietPackets: 0, reviewWavBytes: [], activityStarts: 0, activityEnds: 0,
-    audioOutsideActivity: 0, sentSeconds: 0, manualActivity: false, languageRepairs: 0 };
+    audioOutsideActivity: 0, sentSeconds: 0, manualActivity: false, languageRepairs: 0,
+    continuityRequests: 0 };
   function report() {
     let node = document.getElementById('qa-metrics');
     if (!node && document.body) {
@@ -72,14 +73,22 @@
     if (String(url).endsWith(':generateContent')) {
       metrics.reviewRequests++;
       const body = JSON.parse(options.body);
-      if (body.contents[0].parts[0].text.includes('LANGUAGE REPAIR')) metrics.languageRepairs++;
+      const prompt = body.contents[0].parts[0].text;
+      if (prompt.includes('LANGUAGE REPAIR')) metrics.languageRepairs++;
+      const prior = prompt.split('PREVIOUS RESULT (reference data only): ')[1]?.split('\n')[0];
+      const previousSegments = prior ? JSON.parse(prior).map(segment => ({
+        sourceLanguage: segment.direction.slice(0, 2), targetLanguage: segment.direction.slice(3),
+        original: segment.original, translation: segment.original.includes('青森') ? '我沒有打算去青森' : segment.translation,
+      })) : undefined;
+      if (prior) metrics.continuityRequests++;
       const data = body.contents[0].parts.find(part => part.inlineData).inlineData.data;
       metrics.reviewWavBytes.push(atob(data).length); report();
       const segments = metrics.reviewRequests <= 2 ? [
-        {sourceLanguage:'ja',targetLanguage:'zh',original:'来週は青森に行きます。',translation:metrics.reviewRequests===1?'来週は青森に行きます。':'下周要去青森。'},
-        {sourceLanguage:'zh',targetLanguage:'ja',original:'我想去弘前城。',translation:'弘前城に行きたいです。'},
+        {sourceLanguage:'ja',targetLanguage:'zh',original:'青森に行くつもり',translation:metrics.reviewRequests===1?'青森に行くつもり':'我打算去青森'},
+      ] : prior && metrics.continuityRequests === 1 ? [
+        {sourceLanguage:'ja',targetLanguage:'zh',original:'はありません。弘前に行きます。',translation:'，而是要去弘前。'},
       ] : [];
-      return new Response(JSON.stringify({candidates:[{content:{parts:[{text:JSON.stringify({segments})}]},finishReason:'STOP'}],
+      return new Response(JSON.stringify({candidates:[{content:{parts:[{text:JSON.stringify({segments,previousSegments})}]},finishReason:'STOP'}],
         usageMetadata:{promptTokenCount:816,candidatesTokenCount:90,promptTokensDetails:[{modality:'AUDIO',tokenCount:416},{modality:'TEXT',tokenCount:400}]}}),
         {headers:{'Content-Type':'application/json'}});
     }

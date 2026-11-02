@@ -4,11 +4,15 @@ import { reviewAudio, REVIEW_SECONDS, type ReviewInput, type ReviewUsage } from 
 import { readableError, redactKey } from './config';
 import type { SessionSettings } from './types';
 import { TranslationLanguageError } from './translation-language';
+import { PhraseBoundaries, PHRASE_LOOKAHEAD_SECONDS } from '../audio/phrase-boundaries';
 
 /** Independent of ASR/VAD. Every sample, including silence and quiet onsets, reaches this pass. */
 export class PrecisionReviewer {
-  private audio = new RecentAudio();
+  private audio = new RecentAudio(60);
   private nextStart = 0;
+  private previousStart = 0;
+  private previousWindow?: PrecisionWindow;
+  private boundaries = new PhraseBoundaries();
   private queue: ReviewInput[] = [];
   private pending?: Promise<void>;
   private controller?: AbortController;
@@ -21,7 +25,7 @@ export class PrecisionReviewer {
     beforeRequest: (usage: ReviewUsage) => boolean;
     onUsage: (id: string, seconds: number, usage: ReviewUsage) => void;
     onError?: (message: string) => void;
-  }, private request = reviewAudio) {}
+  }, private request = reviewAudio, private sentenceAware = false) {}
 
   private status(state: 'waiting' | 'working' | 'stopped' | 'error', message: string) {
     if (!this.closed) this.callbacks.emit({ type: 'precision-status', sessionId: this.sessionId, state, message });
@@ -31,10 +35,17 @@ export class PrecisionReviewer {
     if (this.closed || this.failed || this.finishing) return;
     // Capture normally supplies 100 ms. Bound even unexpectedly large input without dropping windows.
     for (let offset = 0; offset < pcm.byteLength; offset += 32000) {
-      this.audio.append(pcm.slice(offset, Math.min(pcm.byteLength, offset + 32000)));
-      while (!this.failed && this.audio.elapsedSeconds >= this.nextStart + REVIEW_SECONDS + 1)
+      const chunk = pcm.slice(offset, Math.min(pcm.byteLength, offset + 32000));
+      this.audio.append(chunk);
+      if (this.sentenceAware) {
+        for (const end of this.boundaries.append(chunk)) {
+          if (this.failed || this.closed) break;
+          this.enqueue(end, end + PHRASE_LOOKAHEAD_SECONDS);
+        }
+      } else while (!this.failed && this.audio.elapsedSeconds >= this.nextStart + REVIEW_SECONDS + 1)
         this.enqueue(this.nextStart + REVIEW_SECONDS, this.nextStart + REVIEW_SECONDS + 1);
       if (this.failed || this.closed) break;
+      this.pump();
     }
     this.pump();
   }
@@ -42,9 +53,14 @@ export class PrecisionReviewer {
   private enqueue(end: number, clipEnd: number) {
     // One in flight, at most two waiting clips. Never silently skip an unreviewed interval.
     if (this.queue.length >= 2) { this.error('原音翻譯速度跟不上收音，已暫停新請求。請停止後重新開始再試。'); return; }
-    const audio = this.audio.snapshot(Math.max(0, this.nextStart - 2), clipEnd);
-    if (!audio) return;
+    const clipStart = this.sentenceAware ? this.previousStart : Math.max(0, this.nextStart - 2);
+    const audio = this.audio.snapshot(clipStart, clipEnd);
+    if (!audio || Math.abs(audio.startSeconds - clipStart) > 1 / 16000
+      || Math.abs(audio.endSeconds - clipEnd) > 1 / 16000) {
+      this.error('原音暫存不完整，無法安全銜接前後句。'); return;
+    }
     this.queue.push({ audio, startSeconds: this.nextStart, endSeconds: end });
+    this.previousStart = this.nextStart;
     this.nextStart = end;
   }
 
@@ -55,16 +71,18 @@ export class PrecisionReviewer {
 
   private async run() {
     while (this.queue.length && !this.closed && !this.failed) {
-      const input = this.queue.shift()!;
+      const queued = this.queue.shift()!;
+      const input: ReviewInput = { ...queued,
+        ...(this.sentenceAware && this.previousWindow ? { previous: this.previousWindow } : {}) };
       const id = crypto.randomUUID();
       const controller = new AbortController(); this.controller = controller;
       const timeout = setTimeout(() => controller.abort(new Error('精準回聽超過 20 秒沒有回覆。')), 20000);
       this.status('working', `正在回聽 ${Math.floor(input.startSeconds)}–${Math.floor(input.endSeconds)} 秒原音…`);
       try {
-        let segments: PrecisionWindow['segments'] = [];
+        let result: Awaited<ReturnType<typeof reviewAudio>> = { segments: [] };
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
-            segments = await this.request({ ...input, settings: this.settings, signal: controller.signal, languageRetry: attempt > 0,
+            result = await this.request({ ...input, settings: this.settings, signal: controller.signal, languageRetry: attempt > 0,
               beforeRequest: usage => !this.closed && !this.failed && this.callbacks.beforeRequest(usage),
               onUsage: usage => { if (!this.closed && !this.failed) this.callbacks.onUsage(attempt ? `${id}-repair` : id, input.audio.durationSeconds, usage); },
             });
@@ -75,8 +93,16 @@ export class PrecisionReviewer {
           }
         }
         if (this.closed || this.failed) return;
+        if (input.previous) {
+          if (!result.previousSegments) throw new Error('缺少前段銜接校對，這段尚未完成。');
+          const previous: PrecisionWindow = { ...input.previous, segments: result.previousSegments,
+            revision: (input.previous.revision ?? 1) + 1 };
+          this.callbacks.emit({ type: 'precision-result', sessionId: this.sessionId, window: previous });
+          if (this.closed || this.failed) return;
+        }
         const window: PrecisionWindow = { id, sessionId: this.sessionId, startSeconds: input.startSeconds,
-          endSeconds: input.endSeconds, segments };
+          endSeconds: input.endSeconds, segments: result.segments, revision: 1 };
+        this.previousWindow = window;
         this.callbacks.emit({ type: 'precision-result', sessionId: this.sessionId, window });
       } catch (error) {
         if (!this.closed && !this.failed) this.error(controller.signal.aborted
@@ -84,7 +110,9 @@ export class PrecisionReviewer {
       } finally { clearTimeout(timeout); if (this.controller === controller) this.controller = undefined; }
     }
     if (!this.failed && !this.closed) this.status(this.finishing ? 'stopped' : 'waiting', this.finishing
-      ? '本場回聽完成。' : '持續保留原音；每約 12 秒回聽一次，不用等待辨識到句子。');
+      ? '本場回聽完成。' : this.sentenceAware
+        ? '持續收音中；優先等自然停頓再翻譯，下一段會連同前段原音校對銜接。'
+        : '持續保留原音；每約 12 秒回聽一次，不用等待辨識到句子。');
   }
 
   private error(message: string) {

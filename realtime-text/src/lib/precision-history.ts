@@ -4,7 +4,10 @@ import { audioTime } from './diagnostics';
 export function precisionHistory(items: PrecisionWindow[], event: ServerMessage | { type: 'clear-history' }): PrecisionWindow[] {
   if (event.type === 'clear-history') return [];
   if (event.type !== 'precision-result' || event.window.sessionId !== event.sessionId) return items;
-  return items.some(item => item.id === event.window.id) ? items : [...items, event.window];
+  const previous = items.find(item => item.id === event.window.id);
+  if (!previous) return [...items, event.window];
+  if ((previous.revision ?? 1) >= (event.window.revision ?? 1)) return items;
+  return items.map(item => item.id === event.window.id ? event.window : item);
 }
 
 export function exportPrecision(items: PrecisionWindow[]): string {

@@ -14,6 +14,11 @@ describe('回聽紀錄與費用保留', () => {
     expect(history).toHaveLength(2); expect(exportPrecision(history)).toContain('青森');
     expect(exportPrecision(history)).toContain('未辨識到清楚語音');
     expect(exportPrecision(history)).toContain('00:00–00:12');
+    const corrected = { ...window, revision: 2, segments: [{ direction: 'zh-ja' as const, original: '不去青森', translation: '青森に行きません' }] };
+    history = precisionHistory(history, { type: 'precision-result', sessionId: 'first', window: corrected });
+    history = precisionHistory(history, { type: 'precision-result', sessionId: 'first', window });
+    expect(history).toHaveLength(2); expect(exportPrecision(history)).toContain('不去青森');
+    expect(history[0].revision).toBe(2);
     expect(precisionHistory(history, { type: 'clear-history' })).toEqual([]);
   });
   it('回聽費用含在總額，跨場次及 metadata 更新都不重複計算', () => {
