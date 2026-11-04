@@ -3,6 +3,7 @@ import { PrecisionReviewer } from '../src/lib/precision-review';
 import type { reviewAudio } from '../src/lib/audio-review';
 import type { ServerMessage } from '../shared/protocol';
 import { TranslationLanguageError } from '../src/lib/translation-language';
+import { AudioRequestError } from '../src/lib/api-error';
 
 const pcm = (seconds: number, value = 0) => new Int16Array(seconds * 16000).fill(value).buffer;
 function harness(request?: typeof reviewAudio) {
@@ -18,6 +19,56 @@ function harness(request?: typeof reviewAudio) {
 afterEach(() => vi.useRealTimers());
 
 describe('回聽不受 VAD／即時文字影響', () => {
+  it('Google 503 保留同段原音，一秒後最多重試一次，兩次請求分開計費', async () => {
+    vi.useFakeTimers(); let attempts = 0;
+    const h = harness(async options => {
+      options.onUsage({ inputTokens: 100, audioTokens: 80, outputTokens: 10, estimated: false });
+      if (!attempts++) throw new AudioRequestError('Google 暫時異常', 503);
+      return { segments: [{ direction: 'zh-ja', original: '沒有遺失這段', translation: '音声を保持しました' }] };
+    });
+    h.reviewer.append(pcm(13, 4)); await vi.advanceTimersByTimeAsync(999);
+    expect(h.query).toHaveBeenCalledOnce(); await vi.advanceTimersByTimeAsync(1);
+    expect(h.query).toHaveBeenCalledTimes(2);
+    expect(h.query.mock.calls[1][0].audio).toBe(h.query.mock.calls[0][0].audio);
+    expect(h.callbacks.onUsage).toHaveBeenCalledTimes(2);
+    expect(new Set(h.callbacks.onUsage.mock.calls.map(call => call[0])).size).toBe(2);
+    expect(h.events.filter(event => event.type === 'precision-result')).toHaveLength(1);
+    h.reviewer.close();
+  });
+  it('設定、金鑰、權限、額度及不支援功能不盲目重試', async () => {
+    vi.useFakeTimers();
+    for (const code of [400, 401, 402, 403, 404, 429, 501]) {
+      const h = harness(async () => { throw new AudioRequestError(`Google ${code}`, code); });
+      h.reviewer.append(pcm(13)); await vi.advanceTimersByTimeAsync(1500);
+      expect(h.query).toHaveBeenCalledOnce();
+      expect(h.events.some(event => event.type === 'precision-status' && event.state === 'error')).toBe(true);
+      h.reviewer.close();
+    }
+  });
+  it('連續服務故障只試兩次，後續收音不會再產生請求或空的成功結果', async () => {
+    vi.useFakeTimers(); const h = harness(async () => { throw new AudioRequestError('Google 503 原因', 503); });
+    h.reviewer.append(pcm(13)); await vi.advanceTimersByTimeAsync(5000); h.reviewer.append(pcm(40));
+    expect(h.query).toHaveBeenCalledTimes(2);
+    expect(h.events.some(event => event.type === 'precision-result')).toBe(false);
+    expect(h.events.some(event => event.type === 'precision-status' && event.state === 'error' && event.message.includes('Google 503 原因'))).toBe(true);
+    h.reviewer.close();
+  });
+  it('等待重試期間取消，不能再上傳或回寫', async () => {
+    vi.useFakeTimers(); const h = harness(async () => { throw new AudioRequestError('Google unavailable', 503); });
+    h.reviewer.append(pcm(13)); await vi.advanceTimersByTimeAsync(100); h.reviewer.close(); const count = h.events.length;
+    await vi.advanceTimersByTimeAsync(5000); expect(h.query).toHaveBeenCalledOnce(); expect(h.events).toHaveLength(count);
+  });
+  it('服務重試與語言修復各限一次，不能相互重設造成無限請求', async () => {
+    vi.useFakeTimers(); let attempts = 0;
+    const h = harness(async () => {
+      if (!attempts++) throw new AudioRequestError('Google unavailable', 503);
+      throw new TranslationLanguageError();
+    });
+    h.reviewer.append(pcm(13)); await vi.advanceTimersByTimeAsync(5000);
+    expect(h.query).toHaveBeenCalledTimes(3);
+    expect(h.query.mock.calls[2][0].languageRetry).toBe(true);
+    expect(h.events.some(event => event.type === 'precision-result')).toBe(false); h.reviewer.close();
+  });
   it('語言錯誤只重試一次，每次請求分別計費，修正完成才加入結果', async () => {
     let attempts = 0;
     const h = harness(async options => {

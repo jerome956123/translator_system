@@ -357,6 +357,6 @@ export default function App() {
         <small>US$1 ≈ NT${displayRate.toLocaleString('zh-TW', {maximumFractionDigits:4})}</small></div>
     </section>
     {Boolean(usage.reviewRequests) && <p className="precision-cost">總額已含原音翻譯 {formatTwd(usdToTwd(usage.reviewEstimatedUsd ?? 0, displayRate))}。請求進行中先顯示保守估算，再依用量更新；失敗與語言重試也可能計費。</p>}
-    <footer>版本 2.8.0 · 精準原音翻譯／空白鍵即時翻譯 · 重新整理會清除翻譯、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
+    <footer>版本 2.8.1 · 精準原音翻譯／空白鍵即時翻譯 · 重新整理會清除翻譯、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
   </main>;
 }

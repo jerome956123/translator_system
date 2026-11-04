@@ -5,6 +5,7 @@ import { directionFor, directionSource, isPairLanguage } from './languages';
 import { sourceText, translatedText } from './chinese';
 import type { SessionSettings } from './types';
 import { assertTranslation, strongTextLanguage, TranslationLanguageError } from './translation-language';
+import { audioRequestError } from './api-error';
 
 export const REVIEW_SECONDS = 12;
 export const REVIEW_OUTPUT_TOKENS = 2048;
@@ -98,7 +99,7 @@ export async function reviewAudio(options: ReviewOptions): Promise<ReviewResult>
         } },
     }),
   });
-  if (!response.ok) throw new Error(`精準回聽失敗（${response.status}）；請檢查模型額度、網路及 API Key 權限。`);
+  if (!response.ok) throw await audioRequestError(response, options.settings.apiKey);
   const data = await response.json();
   const metadata = data.usageMetadata;
   if (metadata) {

@@ -5,6 +5,7 @@ import { readableError, redactKey } from './config';
 import type { SessionSettings } from './types';
 import { TranslationLanguageError } from './translation-language';
 import { PhraseBoundaries, PHRASE_LOOKAHEAD_SECONDS } from '../audio/phrase-boundaries';
+import { AudioRequestError, waitForAudioRetry } from './api-error';
 
 /** Independent of ASR/VAD. Every sample, including silence and quiet onsets, reaches this pass. */
 export class PrecisionReviewer {
@@ -80,16 +81,26 @@ export class PrecisionReviewer {
       this.status('working', `正在回聽 ${Math.floor(input.startSeconds)}–${Math.floor(input.endSeconds)} 秒原音…`);
       try {
         let result: Awaited<ReturnType<typeof reviewAudio>> = { segments: [] };
-        for (let attempt = 0; attempt < 2; attempt++) {
+        let attempt = 0, languageRetried = false, serviceRetried = false;
+        while (true) {
+          const attemptId = attempt ? `${id}-retry-${attempt}` : id;
           try {
-            result = await this.request({ ...input, settings: this.settings, signal: controller.signal, languageRetry: attempt > 0,
+            controller.signal.throwIfAborted();
+            result = await this.request({ ...input, settings: this.settings, signal: controller.signal, languageRetry: languageRetried,
               beforeRequest: usage => !this.closed && !this.failed && this.callbacks.beforeRequest(usage),
-              onUsage: usage => { if (!this.closed && !this.failed) this.callbacks.onUsage(attempt ? `${id}-repair` : id, input.audio.durationSeconds, usage); },
+              onUsage: usage => { if (!this.closed && !this.failed) this.callbacks.onUsage(attemptId, input.audio.durationSeconds, usage); },
             });
             break;
           } catch (error) {
-            if (!(error instanceof TranslationLanguageError) || attempt || controller.signal.aborted || this.closed) throw error;
-            this.status('working', '譯文語言不符，正在重新翻譯這段原音…');
+            if (controller.signal.aborted || this.closed || this.failed) throw error;
+            if (error instanceof TranslationLanguageError && !languageRetried) {
+              languageRetried = true; attempt++;
+              this.status('working', '譯文語言不符，正在重新翻譯這段原音…');
+            } else if (error instanceof AudioRequestError && error.retryable && !serviceRetried) {
+              serviceRetried = true; attempt++;
+              this.status('working', `Google 服務暫時異常（${error.httpStatus}），保留這段原音，1 秒後重試一次…`);
+              await waitForAudioRetry(controller.signal);
+            } else throw error;
           }
         }
         if (this.closed || this.failed) return;
