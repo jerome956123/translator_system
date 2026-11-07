@@ -50,6 +50,7 @@ export default function App() {
   const [exchangeRate, setExchangeRate] = useState(() => String(loadExchangeRate()));
   const [sessionExchangeRate, setSessionExchangeRate] = useState(() => loadExchangeRate());
   const [showOriginal, setShowOriginal] = useState(true);
+  const [readingMode, setReadingMode] = useState(false);
   const [showComparison, setShowComparison] = useState(false);
   const [recentAudioSeconds, setRecentAudioSeconds] = useState(0);
   const [audioClip, setAudioClip] = useState<{
@@ -232,7 +233,7 @@ export default function App() {
 
 
   const time = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`;
-  return <main className={`page-shell ${running ? 'session-active' : ''}`}>
+  return <main className={`page-shell ${running ? 'session-active' : ''} ${readingMode ? 'reading-mode' : ''}`}>
     <header className="hero">
       <h1>語音翻譯</h1>
       <span className={`status status-${status}`}><i />{statusLabel}</span>
@@ -324,7 +325,8 @@ export default function App() {
     </details>
     <section className="workspace">
       <div className="section-title"><h2>翻譯紀錄</h2>
-        <label className="switch"><input type="checkbox" checked={showOriginal} onChange={event => setShowOriginal(event.target.checked)} />顯示原文</label></div>
+        <div className="workspace-options"><label className="switch"><input type="checkbox" checked={showOriginal} onChange={event => setShowOriginal(event.target.checked)} />顯示原文</label>
+          <button className="reading-toggle" aria-pressed={readingMode} onClick={() => setReadingMode(value => !value)}>{readingMode ? '返回設定' : '放大閱讀'}</button></div></div>
       <div className="captions" ref={captionPane} onScroll={event => {
         const pane = event.currentTarget; followBottom.current = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
       }}>
@@ -357,6 +359,6 @@ export default function App() {
         <small>US$1 ≈ NT${displayRate.toLocaleString('zh-TW', {maximumFractionDigits:4})}</small></div>
     </section>
     {Boolean(usage.reviewRequests) && <p className="precision-cost">總額已含原音翻譯 {formatTwd(usdToTwd(usage.reviewEstimatedUsd ?? 0, displayRate))}。請求進行中先顯示保守估算，再依用量更新；失敗與語言重試也可能計費。</p>}
-    <footer>版本 2.8.1 · 精準原音翻譯／空白鍵即時翻譯 · 重新整理會清除翻譯、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
+    <footer>版本 2.8.2 · 精準原音翻譯／空白鍵即時翻譯 · 重新整理會清除翻譯、原音片段及累計用量，請先下載。費用與預算停止皆為估算。</footer>
   </main>;
 }
