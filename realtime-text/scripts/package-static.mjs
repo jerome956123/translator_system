@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { copyFile, readFile, writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pageChecks from '../../scripts/check-page.cjs';
@@ -27,4 +27,7 @@ pageChecks.assertNoConflicts(await readFile(resolve(root, '..', '.gitignore'), '
 await writeFile(resolve(dist, 'index.html'), entry);
 await writeFile(resolve(dist, 'standalone.html'), html);
 await writeFile(resolve(root, '..', 'index.html'), html);
+// 主畫面圖示與 manifest 是首頁旁的獨立小檔；根目錄首頁用相對路徑讀取，需一併放到發佈位置。
+for (const file of ['manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-180.png'])
+  await copyFile(resolve(dist, file), resolve(root, '..', file));
 console.log('已產生純前端網站 dist/，以及可直接更新 GitHub Pages 首頁的 index.html。');

@@ -54,13 +54,37 @@ describe('以原音翻譯作為唯一主流程', () => {
     expect(h.events.some(event => event.type === 'status' && event.status === 'stopped')).toBe(true);
   });
 
-  it('剩餘預算不足或翻譯失敗會停止收音，不暗中改回即時流程', async () => {
+  it('剩餘預算不足會停止收音並標示未翻譯範圍，不暗中改回即時流程', async () => {
     const h = harness(.000001); await h.session.start(); h.audio(23); await settle();
     expect(h.events.some(event => event.type === 'error' && event.message.includes('預算'))).toBe(true);
     expect(h.capture.stop).toHaveBeenCalledWith(false); expect(h.session.snapshotAudio()).toBeDefined();
-    const failed = harness(); failed.reviewAudio.mockRejectedValueOnce(new Error('model failed'));
-    await failed.session.start(); failed.audio(23); await settle(); failed.audio(23); await settle();
-    expect(failed.reviewAudio).toHaveBeenCalledOnce(); expect(failed.events.some(event => event.type === 'error')).toBe(true);
+    expect(h.events.find(event => event.type === 'precision-gap')).toMatchObject({ startSeconds: 0, endSeconds: 23 });
+  });
+
+  it('單段翻譯失敗不停止收音，下一段連同原音補翻，紀錄沒有缺口', async () => {
+    const h = harness(); h.reviewAudio.mockRejectedValueOnce(new Error('model failed'));
+    await h.session.start(); h.audio(23); await settle();
+    expect(h.events.some(event => event.type === 'error')).toBe(false); expect(h.capture.stop).not.toHaveBeenCalled();
+    h.audio(20); await settle();
+    expect(h.reviewAudio).toHaveBeenCalledTimes(2);
+    const recovery = h.reviewAudio.mock.calls[1][0];
+    expect(recovery).toMatchObject({ startSeconds: 0, endSeconds: 40, audio: { startSeconds: 0, endSeconds: 43 } });
+    expect(recovery.previous).toBeUndefined();
+    const history = h.events.reduce((items, event) => captionHistory(items, { type: 'message', event, direction: 'zh-ja' }), [] as Parameters<typeof captionHistory>[0]);
+    expect(history).toHaveLength(1); expect(history[0].gap).toBeUndefined();
+    h.session.dispose();
+  });
+
+  it('停止時最後一段失敗：紀錄與 TXT 標示未翻譯，場次正常結束而非錯誤', async () => {
+    const h = harness(); await h.session.start(); h.audio(23); await settle(); h.audio(5);
+    h.reviewAudio.mockRejectedValueOnce(new Error('model failed')); await h.session.stop();
+    expect(h.events.some(event => event.type === 'error')).toBe(false);
+    expect(h.events.some(event => event.type === 'status' && event.status === 'stopped')).toBe(true);
+    const history = h.events.reduce((items, event) => captionHistory(items, { type: 'message', event, direction: 'zh-ja' }), [] as Parameters<typeof captionHistory>[0]);
+    expect(history).toHaveLength(2);
+    expect(history[1]).toMatchObject({ direction: 'ja-zh', gap: { startSeconds: 20, endSeconds: 28, message: 'model failed' } });
+    const exported = exportParagraphs(groupCaptions(history), true);
+    expect(exported).toContain('下週要去青森。'); expect(exported).toContain('[未翻譯] 收音 00:20–00:28 這段未能翻譯：model failed');
   });
 
   it('取消準備或晚到回覆不能重新啟動收音／改寫已清除紀錄', async () => {
@@ -131,13 +155,18 @@ describe('以原音翻譯作為唯一主流程', () => {
     h.session.dispose();
   });
 
-  it('前段銜接回覆缺失時保留已完成紀錄並停止，取消後回覆也不能改寫', async () => {
+  it('前段銜接回覆缺失時不寫入這段、保留已完成紀錄，下一段補翻；取消後回覆也不能改寫', async () => {
     const h = harness(); await h.session.start(); h.audio(23); await settle();
     const results = () => h.events.filter(event => event.type === 'transcript' || event.type === 'translation');
     const count = results().length;
     h.reviewAudio.mockResolvedValueOnce({ segments: [] }); h.audio(20); await settle();
-    expect(results()).toHaveLength(count); expect(h.events.some(event => event.type === 'error')).toBe(true);
-    expect(h.capture.stop).toHaveBeenCalledWith(false);
+    expect(results()).toHaveLength(count); expect(h.events.some(event => event.type === 'error')).toBe(false);
+    expect(h.capture.stop).not.toHaveBeenCalled();
+    h.audio(20); await settle();
+    const recovery = h.reviewAudio.mock.calls[2][0];
+    expect(recovery).toMatchObject({ startSeconds: 20, endSeconds: 60, audio: { startSeconds: 20, endSeconds: 63 } });
+    expect(recovery.previous).toBeUndefined();
+    expect(results().length).toBeGreaterThan(count); h.session.dispose();
     const late = harness(); await late.session.start(); late.audio(23); await settle(); let release!: () => void;
     late.reviewAudio.mockImplementationOnce(options => new Promise(resolve => { release = () => resolve({
       previousSegments: options.previous.segments, segments: [],

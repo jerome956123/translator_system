@@ -120,7 +120,7 @@ describe('純前端場次生命週期', () => {
 
   it('回聽預估費用超出剩餘預算時，不上傳額外原音，即時字幕持續', async () => {
     const h = harness(.002, undefined, 'zh-ja', true); await h.session.start();
-    h.audio(new Int16Array(16000 * 13).buffer); await Promise.resolve(); await Promise.resolve();
+    h.audio(new Int16Array(16000 * 13).fill(500).buffer); await Promise.resolve(); await Promise.resolve();
     expect(h.events.some(event => event.type === 'precision-status' && event.state === 'error')).toBe(true);
     expect(h.events.some(event => event.type === 'error')).toBe(false);
     expect(h.events.filter(event => event.type === 'usage').at(-1)).toMatchObject({ usage: { translationRequests: 0 } });

@@ -1,7 +1,13 @@
 import { DIRECTIONS, type Direction, type Language, type ServerMessage } from '../../shared/protocol';
 import { AudioCapture, pcmLevel } from '../audio/capture';
 import { RecentAudio } from '../audio/recent-audio';
-import { readableError } from './config';
+import { pricesFor, readableError } from './config';
+import { recentPairs } from './guidance';
+
+const recentField = (pairs: [string, string][]) => {
+  const recent = recentPairs(pairs);
+  return recent.length ? { recent } : {};
+};
 import { GeminiBrowserSTT, type STTConnection } from './stt';
 import { TranslationScheduler } from './scheduler';
 import { TranscriptAssembler } from './transcripts';
@@ -33,7 +39,7 @@ export class BrowserTranslationSession {
   private stt: STTConnection;
   private scheduler: TranslationScheduler;
   private assembler: TranscriptAssembler;
-  private usage = new UsageTracker();
+  private usage: UsageTracker;
   private stopping = false;
   private disposed = false;
   private ready = false;
@@ -60,10 +66,12 @@ export class BrowserTranslationSession {
   constructor(private settings: SessionSettings, private emit: (event: ServerMessage) => void, dependencies: Dependencies = {}) {
     this.capture = dependencies.capture ?? new AudioCapture(settings.audioSource);
     this.previousLanguage = directionSource(settings.direction);
+    const prices = pricesFor(settings.quality);
+    this.usage = new UsageTracker(prices);
     if (settings.precisionReview) this.reviewer = new PrecisionReviewer(this.id, settings, {
       emit: event => this.send(event),
       beforeRequest: estimate => !this.disposed && (!settings.budgetUsd
-        || this.usage.snapshot().estimatedUsd + reviewCost(estimate) < settings.budgetUsd),
+        || this.usage.snapshot().estimatedUsd + reviewCost(estimate, prices) < settings.budgetUsd),
       onUsage: (id, seconds, usage) => {
         this.usage.recordReview(id, seconds, usage); this.sendUsage(); this.budget();
       },
@@ -132,6 +140,12 @@ export class BrowserTranslationSession {
         .map(item => this.edited.get(item.captionId)?.original ?? item.text)].filter(Boolean).join('\n').slice(-512),
       following: tasks.slice(index + 1, index + 3).map(item => item.text).join('\n').slice(0, 220),
       vocabulary: this.settings.customVocabulary ?? [],
+      ...(this.settings.guidance ? { guidance: this.settings.guidance } : {}),
+      ...(this.settings.quality ? { quality: this.settings.quality } : {}),
+      // 已定稿且不在本次校對名單內的前幾句，連同譯文一起給，維持譯名與語氣一致。
+      ...recentField([...(this.settings.recent ?? []), ...preceding.filter(item => item.final && this.edited.has(item.captionId)
+        && !review.some(reviewed => reviewed.captionId === item.captionId))
+        .map(item => [this.edited.get(item.captionId)!.original, this.edited.get(item.captionId)!.translation] as [string, string])]),
     };
   }
 

@@ -1,5 +1,5 @@
 import type { UsageSnapshot } from '../../shared/protocol';
-import { PRICES } from './config';
+import { PRICES, type Prices } from './config';
 import { reviewCost, type ReviewUsage } from './audio-review';
 
 // 保守的本機字數估算，提示、前文及失敗的請求都要計入。優先使用實際 metadata。
@@ -10,6 +10,9 @@ export class UsageTracker {
   private sttBytes = 0;
   private attempts = new Map<string, { input: number; output: number; estimated: boolean }>();
   private reviews = new Map<string, ReviewUsage & { seconds: number }>();
+
+  /** 價格依本場選用的模型而定；預設為 Flash-Lite。 */
+  constructor(private prices: Prices = PRICES) {}
 
   addAudioBytes(bytes: number, billSTT = true) {
     this.audioBytes += Math.max(0, bytes);
@@ -42,13 +45,13 @@ export class UsageTracker {
     for (const review of this.reviews.values()) {
       inputTokens += review.inputTokens; outputTokens += review.outputTokens;
       tokenEstimate ||= review.estimated;
-      reviewAudioSeconds += review.seconds; reviewEstimatedUsd += reviewCost(review);
+      reviewAudioSeconds += review.seconds; reviewEstimatedUsd += reviewCost(review, this.prices);
     }
     return {
       audioSeconds, translationRequests: this.attempts.size, inputTokens, outputTokens,
-      estimatedUsd: this.sttBytes / 32000 / 60 * PRICES.sttPerMinute
+      estimatedUsd: this.sttBytes / 32000 / 60 * this.prices.sttPerMinute
         + [...this.attempts.values()].reduce((total, item) => total
-          + item.input / 1e6 * PRICES.textInputPerMillion + item.output / 1e6 * PRICES.textOutputPerMillion, 0)
+          + item.input / 1e6 * this.prices.textInputPerMillion + item.output / 1e6 * this.prices.textOutputPerMillion, 0)
         + reviewEstimatedUsd,
       isEstimate: true, tokenEstimate,
       ...(this.reviews.size ? { reviewRequests: this.reviews.size, reviewAudioSeconds, reviewEstimatedUsd } : {}),

@@ -56,6 +56,8 @@ export type ServerMessage =
   | { type: 'talk-state'; sessionId: string; state: TalkState }
   | { type: 'precision-result'; sessionId: string; window: PrecisionWindow }
   | { type: 'precision-status'; sessionId: string; state: 'waiting' | 'working' | 'stopped' | 'error'; message: string }
+  // 這段原音經重試後仍無法翻譯；收音不中斷，紀錄中留下看得見的缺口。
+  | { type: 'precision-gap'; sessionId: string; gapId: string; startSeconds: number; endSeconds: number; message: string; receivedAt: number }
   | { type: 'status'; sessionId: string; status: 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped'; message?: string }
   | { type: 'audio-level'; sessionId: string; level: number }
   | { type: 'transcript'; sessionId: string; captionId: string; paragraphId?: string; direction?: Direction; origin?: 'precision' | 'live'; rawText?: string; revision: number; text: string; final: boolean; receivedAt: number }

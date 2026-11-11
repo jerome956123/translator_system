@@ -4,8 +4,23 @@ export class AudioRequestError extends Error {
   readonly retryable: boolean;
   constructor(message: string, readonly httpStatus: number) {
     super(message); this.name = 'AudioRequestError';
-    this.retryable = [500, 502, 503, 504].includes(httpStatus);
+    // 逾時、速率限制與服務端故障通常是暫時的；設定、金鑰、權限類錯誤重試也不會成功。
+    this.retryable = [408, 429, 500, 502, 503, 504].includes(httpStatus);
   }
+}
+
+/** 瀏覽器在斷網、DNS 失敗或連線被阻擋時，fetch 會以 TypeError 拒絕。 */
+export function isTransientAudioError(error: unknown): boolean {
+  return error instanceof AudioRequestError ? error.retryable : error instanceof TypeError;
+}
+
+/** 給狀態列與缺口標記用的簡短原因；完整的 Google 訊息只在需要使用者處理時顯示。 */
+export function shortAudioReason(error: unknown): string {
+  if (error instanceof AudioRequestError) return error.httpStatus === 429 ? 'Google 額度或速率限制（429）'
+    : `Google 服務暫時異常（${error.httpStatus}）`;
+  if (error instanceof TypeError) return '無法連上 Google，網路可能中斷';
+  if (error instanceof SyntaxError) return 'AI 回覆格式不完整';
+  return error instanceof Error && error.message ? error.message : '發生未知錯誤';
 }
 
 /** Keep the provider's reason visible without exposing credentials or echoing a response body. */
@@ -38,11 +53,11 @@ export async function audioRequestError(response: Response, apiKey: string): Pro
   return new AudioRequestError(`精準回聽失敗（${response.status}${status ? ` / ${status}` : ''}）。${hint}${reason ? ` Google 原因：${reason}` : ''}`, response.status);
 }
 
-export function waitForAudioRetry(signal: AbortSignal) {
+export function waitForAudioRetry(signal: AbortSignal, ms = 1000) {
   signal.throwIfAborted();
   return new Promise<void>((resolve, reject) => {
     const cancel = () => { clearTimeout(timer); signal.removeEventListener('abort', cancel); reject(signal.reason); };
-    const timer = setTimeout(() => { signal.removeEventListener('abort', cancel); resolve(); }, 1000);
+    const timer = setTimeout(() => { signal.removeEventListener('abort', cancel); resolve(); }, ms);
     signal.addEventListener('abort', cancel, { once: true });
   });
 }

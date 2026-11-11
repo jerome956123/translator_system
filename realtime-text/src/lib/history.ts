@@ -31,10 +31,26 @@ export function captionHistory(items: Caption[], action: Action): Caption[] {
     ? { ...item, translation: event.text, translationRevision: event.revision,
       direction: event.direction ?? item.direction,
       original: event.direction && event.direction !== item.direction ? sourceText(item.rawOriginal ?? item.original, event.direction) : item.original,
-      translationFinal: event.final && item.revision === event.revision } : item);
+      translationFinal: event.final && item.revision === event.revision,
+      // 精準模式的譯文是整段一次到位；之後再變動就是後文校對改寫了讀者看過的內容。
+      ...(item.origin === 'precision' ? revised(item, event.text) : {}) } : item);
   if (event.type === 'caption-correction') return items.map(item => item.id === event.captionId
     && item.sessionId === event.sessionId && item.revision === event.revision
     ? { ...item, original: event.original, translation: event.translation, corrected: event.corrected, direction: event.direction ?? item.direction,
-      translationRevision: event.revision, originalFinal: event.final, translationFinal: event.final } : item);
+      translationRevision: event.revision, originalFinal: event.final, translationFinal: event.final,
+      // 即時模式：只有已定稿的句子被改寫才算校正，串流中的草稿更新不算。
+      ...(item.translationFinal ? revised(item, event.translation) : {}) } : item);
+  if (event.type === 'precision-gap') {
+    if (items.some(item => item.id === event.gapId)) return items;
+    return [...items, { id: event.gapId, sessionId: event.sessionId, origin: 'precision' as const,
+      // 沿用前一句的方向，避免缺口標記自己切出一個語言分隔線。
+      direction: items.at(-1)?.direction ?? direction, receivedAt: event.receivedAt, paragraphId: event.gapId,
+      revision: 1, original: '', translation: '', translationRevision: 1, originalFinal: true, translationFinal: true,
+      gap: { startSeconds: event.startSeconds, endSeconds: event.endSeconds, message: event.message } }];
+  }
   return items;
+}
+
+function revised(item: Caption, next: string): Pick<Caption, 'previousTranslation' | 'revisedAt'> | Record<string, never> {
+  return item.translation && item.translation !== next ? { previousTranslation: item.translation, revisedAt: Date.now() } : {};
 }

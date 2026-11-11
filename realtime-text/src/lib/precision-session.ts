@@ -1,10 +1,11 @@
-import type { PrecisionWindow, ServerMessage } from '../../shared/protocol';
+import type { PrecisionSegment, PrecisionWindow, ServerMessage } from '../../shared/protocol';
 import { AudioCapture, pcmLevel } from '../audio/capture';
 import { RecentAudio } from '../audio/recent-audio';
 import type { SessionSettings } from './types';
 import { PrecisionReviewer } from './precision-review';
 import { reviewAudio, reviewCost } from './audio-review';
-import { readableError } from './config';
+import { PACES, pricesFor, readableError } from './config';
+import { recentPairs } from './guidance';
 import { UsageTracker } from './usage';
 
 interface Capture {
@@ -19,7 +20,7 @@ export class PrecisionTranslationSession {
   private capture: Capture;
   private reviewer: PrecisionReviewer;
   private recent = new RecentAudio();
-  private usage = new UsageTracker();
+  private usage: UsageTracker;
   private started = false;
   private stopping = false;
   private disposed = false;
@@ -28,18 +29,22 @@ export class PrecisionTranslationSession {
   private finishing?: Promise<void>;
   private paragraph = 1;
   private paragraphChars = 0;
-  private published = new Map<string, { revision: number; paragraphs: string[] }>();
+  private published = new Map<string, { revision: number; paragraphs: string[]; segments: PrecisionSegment[]; corrected: boolean[] }>();
   private contextWindows = new Map<string, PrecisionWindow>();
   private initialContext: string;
+  private initialRecent: [string, string][];
 
   constructor(private settings: SessionSettings, private emit: (event: ServerMessage) => void,
     dependencies: { capture?: Capture; reviewAudio?: typeof reviewAudio } = {}) {
     this.initialContext = settings.context ?? '';
+    this.initialRecent = settings.recent ?? [];
+    const prices = pricesFor(settings.quality);
+    this.usage = new UsageTracker(prices);
     this.capture = dependencies.capture ?? new AudioCapture(settings.audioSource);
     this.reviewer = new PrecisionReviewer(this.id, settings, {
       emit: event => this.reviewEvent(event), onError: message => this.fail(message),
       beforeRequest: estimate => !this.disposed && (!settings.budgetUsd
-        || this.usage.snapshot().estimatedUsd + reviewCost(estimate) < settings.budgetUsd),
+        || this.usage.snapshot().estimatedUsd + reviewCost(estimate, prices) < settings.budgetUsd),
       onUsage: (id, seconds, usage) => {
         if (this.disposed) return;
         this.usage.recordReview(id, seconds, usage); this.sendUsage();
@@ -60,6 +65,7 @@ export class PrecisionTranslationSession {
       const revision = event.window.revision ?? 1;
       if (old && old.revision >= revision) return;
       const paragraphs: string[] = [];
+      const corrected: boolean[] = [];
       event.window.segments.forEach((segment, index) => {
         const captionId = `${event.window.id}-${index}`;
         let paragraphId = old?.paragraphs[index] ?? old?.paragraphs.at(-1);
@@ -75,18 +81,26 @@ export class PrecisionTranslationSession {
           rawText: segment.original, final: true, receivedAt: Date.now() });
         this.send({ type: 'translation', sessionId: this.id, captionId, requestId: event.window.id,
           direction: segment.direction, revision, text: segment.translation, final: true });
+        // 前段每次都會整段重送；只有內容真的不同才標示為「已校正」。
+        const before = old?.segments[index];
+        const changed = Boolean(old) && (Boolean(old!.corrected[index]) || !before || before.original !== segment.original
+          || before.translation !== segment.translation || before.direction !== segment.direction);
+        corrected.push(changed);
         if (old) this.send({ type: 'caption-correction', sessionId: this.id, captionId, revision,
           direction: segment.direction, original: segment.original, translation: segment.translation,
-          corrected: true, final: true });
+          corrected: changed, final: true });
       });
       if (old && old.paragraphs.length > paragraphs.length) this.send({ type: 'remove-captions', sessionId: this.id,
         captionIds: old.paragraphs.slice(paragraphs.length).map((_, index) => `${event.window.id}-${paragraphs.length + index}`) });
-      this.published.set(event.window.id, { revision, paragraphs });
+      this.published.set(event.window.id, { revision, paragraphs, segments: event.window.segments, corrected });
       this.contextWindows.set(event.window.id, event.window);
       // Only the immediately preceding interval is revised; keep bounded, deduplicated text context.
       while (this.contextWindows.size > 8) this.contextWindows.delete(this.contextWindows.keys().next().value!);
       this.settings.context = [this.initialContext, ...[...this.contextWindows.values()]
         .flatMap(window => window.segments.map(segment => segment.original))].join('\n').slice(-1024);
+      // 帶著先前的譯文，讓人名、術語與語氣在整場對話中前後一致。
+      this.settings.recent = recentPairs([...this.initialRecent, ...[...this.contextWindows.values()]
+        .flatMap(window => window.segments.map(segment => [segment.original, segment.translation] as [string, string]))]);
     } else this.send(event);
   }
 
@@ -98,8 +112,9 @@ export class PrecisionTranslationSession {
       await this.capture.prepare();
       if (this.stopping || this.disposed) return;
       await this.capture.start(chunk => this.audio(chunk), message => { if (!this.stopping) this.fail(message); });
+      const pace = PACES[this.settings.pace ?? 'standard'];
       if (!this.stopping && !this.disposed)
-        this.status('listening', '持續收音中；約 12–20 秒優先在停頓處分段，再等 3 秒後文後翻譯。前段會隨新內容校對。');
+        this.status('listening', `持續收音中；約 ${pace.minSeconds}–${pace.maxSeconds} 秒優先在停頓處分段，再等 ${pace.lookaheadSeconds} 秒後文後翻譯。前段會隨新內容校對。`);
     } catch (error) {
       if (!this.stopping && !this.disposed) this.fail(error instanceof DOMException && error.name === 'NotAllowedError'
         ? '無法使用音訊來源。請確認 HTTPS、麥克風或分享音訊權限。' : readableError(error));
@@ -119,6 +134,8 @@ export class PrecisionTranslationSession {
   }
 
   get recentAudioSeconds() { return this.recent.durationSeconds; }
+  /** 這一段已收進、尚未送出翻譯的秒數。 */
+  get pendingSeconds() { return this.disposed ? 0 : this.reviewer.pendingSeconds; }
   snapshotAudio() { return this.recent.snapshot(); }
   private sendUsage() { this.lastUsage = Date.now(); this.send({ type: 'usage', sessionId: this.id, usage: this.usage.snapshot() }); }
 
