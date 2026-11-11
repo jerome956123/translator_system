@@ -54,7 +54,18 @@ function bounded<T>(promise: Promise<T>, ms: number, message: string): Promise<T
   });
 }
 
+export interface CaptureOptions {
+  /** 連續 5 秒沒有聲音資料時是否要當成錯誤結束。按住說話的模式在待命時回傳 false：這時本來就沒有送出聲音，不必中斷。 */
+  stallIsFatal?: () => boolean;
+  /** 不當成錯誤的中斷開始（true）與恢復（false）時通知。 */
+  onStall?: (stalled: boolean) => void;
+}
+export const STALL_RECOVER_MS = 1500;
+export const STALL_LIMIT_MS = 5000;
+
 export class AudioCapture {
+  private stalled = false;
+  private options: CaptureOptions = {};
   private stream: MediaStream | null = null;
   private context: AudioContext | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
@@ -137,12 +148,20 @@ export class AudioCapture {
     return this.prepared;
   }
 
-  async start(onChunk: (chunk: ArrayBuffer) => void, onError?: (message: string) => void) {
+  /** 手機可能因來電、朗讀或系統音訊切換而暫停收音；在使用者按下說話鍵時呼叫，趁這次點按把收音叫醒。 */
+  wake() {
+    const context = this.context;
+    if (this.stopped || !context || context.state === 'running' || context.state === 'closed') return;
+    void context.resume().catch(() => {});
+  }
+
+  async start(onChunk: (chunk: ArrayBuffer) => void, onError?: (message: string) => void, options: CaptureOptions = {}) {
     await this.prepare();
     if (this.stopped || !this.context || !this.stream) throw new DOMException('已停止', 'AbortError');
     if (!this.stream.getAudioTracks().some(track => track.readyState === 'live')) throw new Error('音訊來源已結束，請重新開始並選擇音源。');
     this.onChunk = onChunk;
     this.onError = onError;
+    this.options = options;
     this.source = this.context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.context, 'pcm16-resampler', {
       numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
@@ -153,6 +172,7 @@ export class AudioCapture {
     this.node.port.onmessage = (event: MessageEvent<ArrayBuffer | { type: string }>) => {
       if (event.data instanceof ArrayBuffer && event.data.byteLength) {
         this.lastFrame = Date.now();
+        if (this.stalled) { this.stalled = false; this.options.onStall?.(false); }
         this.onChunk?.(event.data);
         this.firstFrame?.resolve(); this.firstFrame = undefined;
       }
@@ -167,7 +187,12 @@ export class AudioCapture {
     await bounded(first, 4000, '已取得權限，但瀏覽器沒有送出音訊。請確認麥克風未被其他 App 佔用，保持此頁在前景後重新開始。');
     if (this.stopped) throw new DOMException('已停止', 'AbortError');
     this.watchdog = setInterval(() => {
-      if (Date.now() - this.lastFrame > 5000) this.reportError('收音已中斷超過 5 秒，已停止翻譯。請回到此頁確認麥克風，然後重新開始。');
+      const silentFor = Date.now() - this.lastFrame;
+      // 先自己嘗試恢復：手機的音訊中斷結束後，瀏覽器不一定會自動繼續。
+      if (silentFor > STALL_RECOVER_MS) this.wake();
+      if (silentFor <= STALL_LIMIT_MS) return;
+      if (this.options.stallIsFatal?.() ?? true) this.reportError('收音已中斷超過 5 秒，已停止翻譯。請回到此頁確認麥克風，然後重新開始。');
+      else if (!this.stalled) { this.stalled = true; this.options.onStall?.(true); }
     }, 1000);
   }
 

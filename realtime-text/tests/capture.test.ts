@@ -112,6 +112,36 @@ describe('實際收音啟動與中斷', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it('按住說話的待命期間收音暫停不算錯誤：自動嘗試恢復、通知一次，恢復後再通知；說話中才報錯', async () => {
+    harness(); const onError = vi.fn(); const onStall = vi.fn(); let talking = false;
+    const capture = new AudioCapture(); await capture.prepare();
+    const start = capture.start(vi.fn(), onError, { stallIsFatal: () => talking, onStall });
+    await vi.advanceTimersByTimeAsync(10); Worklet.current.frame(); await start;
+    // 模擬手機把音訊中斷，而且暫時恢復不了。
+    Context.current.state = 'interrupted'; Context.current.resume.mockClear();
+    Context.current.resume.mockImplementation(async () => {});
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(Context.current.resume).toHaveBeenCalled(); expect(onStall).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(onStall).toHaveBeenCalledExactlyOnceWith(true); expect(onError).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(onError).not.toHaveBeenCalled(); expect(onStall).toHaveBeenCalledOnce();
+    Worklet.current.frame(); expect(onStall).toHaveBeenLastCalledWith(false);
+    talking = true; await vi.advanceTimersByTimeAsync(6100);
+    expect(onError).toHaveBeenLastCalledWith(expect.stringContaining('5 秒'));
+    await capture.stop(false);
+  });
+
+  it('按下說話鍵時叫醒被暫停的收音；正常運作中不重複呼叫', async () => {
+    harness(); const capture = new AudioCapture(); await capture.prepare();
+    const start = capture.start(vi.fn()); await vi.advanceTimersByTimeAsync(10); Worklet.current.frame(); await start;
+    Context.current.resume.mockClear();
+    capture.wake(); expect(Context.current.resume).not.toHaveBeenCalled();
+    Context.current.state = 'interrupted'; capture.wake();
+    expect(Context.current.resume).toHaveBeenCalledOnce(); expect(Context.current.state).toBe('running');
+    await capture.stop(false); capture.wake(); expect(Context.current.resume).toHaveBeenCalledOnce();
+  });
+
   it('等待第一包 PCM 時按停止，立即結束等待且不留計時器', async () => {
     harness(); const capture = new AudioCapture(); await capture.prepare();
     const assertion = expect(capture.start(vi.fn())).rejects.toMatchObject({ name: 'AbortError' });

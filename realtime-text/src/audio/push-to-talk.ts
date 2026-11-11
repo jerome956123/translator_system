@@ -43,6 +43,9 @@ export class PushToTalkGate {
     }
   }
 
+  /** 收音中斷過：中斷前留下的聲音已經過時，不當作下一句的前置音。 */
+  discardPreRoll() { this.sentUntil = this.samples; }
+
   press() {
     if (this.state === 'closed' || this.state === 'finishing') return false;
     if (this.state === 'speaking') return true;

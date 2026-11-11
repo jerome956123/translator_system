@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BrowserTranslationSession } from '../src/lib/session';
+import { BrowserTranslationSession, TALK_STALL_LIMIT_MS } from '../src/lib/session';
+import type { CaptureOptions } from '../src/audio/capture';
 import type { Direction, ServerMessage } from '../shared/protocol';
 import { FACE_TEXT, faceButtonState, faceLanguages, faceLines, faceTurns } from '../src/lib/face';
 import { faceFlipPreference, faceNearPreference, faceSpeakPreference, loadTranslationMode, saveTranslationMode } from '../src/lib/preferences';
@@ -9,12 +10,14 @@ function harness() {
   const events: ServerMessage[] = [];
   let audio!: (data: ArrayBuffer) => void;
   let callbacks!: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onTurnComplete?: () => void };
-  const capture = { prepare: vi.fn(async () => {}), start: vi.fn(async (next: typeof audio) => { audio = next; }), stop: vi.fn(async () => {}) };
+  let options: CaptureOptions | undefined;
+  const capture = { prepare: vi.fn(async () => {}), stop: vi.fn(async () => {}), wake: vi.fn(),
+    start: vi.fn(async (next: typeof audio, _onError?: (message: string) => void, given?: CaptureOptions) => { audio = next; options = given; }) };
   const stt = { connect: vi.fn(async () => {}), sendAudio: vi.fn(() => true), startActivity: vi.fn(() => true), endActivity: vi.fn(() => true), endAudio: vi.fn(), close: vi.fn() };
   const translate = vi.fn(async options => { options.onChunk('訳文'); return { text: '訳文' }; });
   const session = new BrowserTranslationSession({ apiKey: 'fake-key', direction: 'zh-ja', pair: 'zh-ja', mode: 'saving', listeningMode: 'push-to-talk' },
     event => events.push(event), { capture, createSTT: next => { callbacks = next; return stt; }, translate });
-  return { session, events, stt, translate, get callbacks() { return callbacks; }, audio: (data: ArrayBuffer) => audio(data) };
+  return { session, events, stt, translate, capture, get callbacks() { return callbacks; }, get options() { return options!; }, audio: (data: ArrayBuffer) => audio(data) };
 }
 afterEach(() => vi.useRealTimers());
 
@@ -66,6 +69,61 @@ describe('面對面對講：按哪一側就是哪一種語言', () => {
     vi.useFakeTimers(); const h = harness(); await h.session.start();
     h.session.pressTalk('en'); h.callbacks.onInterim('你好嗎', 'cmn-Hans-CN'); await vi.advanceTimersByTimeAsync(10);
     expect(h.translate.mock.calls[0][0].audioLanguage).toBe('zh'); h.session.dispose();
+  });
+});
+
+describe('按住說話的待命期間：收音暫停不結束對講', () => {
+  it('待命時收不到聲音不算錯誤，只提示並在恢復時告知；場次保持可用', async () => {
+    vi.useFakeTimers(); const h = harness(); await h.session.start();
+    h.audio(new Int16Array(1600).fill(5).buffer);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.options.stallIsFatal!()).toBe(false);
+    h.options.onStall!(true);
+    expect(h.events.at(-1)).toMatchObject({ type: 'warning', message: expect.stringContaining('麥克風暫時沒有送出聲音') });
+    h.options.onStall!(false);
+    expect(h.events.at(-1)).toMatchObject({ type: 'status', status: 'listening', message: expect.stringContaining('已恢復') });
+    expect(h.events.some(event => event.type === 'error')).toBe(false);
+    expect(h.session.pressTalk('zh')).toBe(true); h.session.dispose();
+  });
+
+  it('暫停後按下會叫醒麥克風，且不把暫停前的舊聲音當成這句的開頭', async () => {
+    vi.useFakeTimers(); const h = harness(); await h.session.start();
+    h.audio(new Int16Array(16000).fill(7).buffer);
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(h.session.pressTalk('ja')).toBe(true);
+    expect(h.capture.wake).toHaveBeenCalledOnce(); expect(h.stt.startActivity).toHaveBeenCalledOnce();
+    expect(h.stt.sendAudio).not.toHaveBeenCalled();
+    h.audio(new Int16Array(1600).fill(9).buffer);
+    expect(h.stt.sendAudio).toHaveBeenCalledOnce(); h.session.dispose();
+  });
+
+  it('收音正常時按下不額外叫醒，照常帶入按下前 0.8 秒的聲音', async () => {
+    vi.useFakeTimers(); const h = harness(); await h.session.start();
+    h.audio(new Int16Array(16000).fill(7).buffer);
+    await vi.advanceTimersByTimeAsync(200);
+    h.session.pressTalk('zh');
+    expect(h.capture.wake).not.toHaveBeenCalled();
+    const bytes = h.stt.sendAudio.mock.calls.reduce((total, call) => total + (call as unknown as [ArrayBuffer])[0].byteLength, 0);
+    expect(bytes).toBe(25600); h.session.dispose();
+  });
+
+  it('按住說話超過 5 秒仍收不到聲音才算中斷；放開後又回到不算', async () => {
+    vi.useFakeTimers(); const h = harness(); await h.session.start();
+    h.session.pressTalk('zh');
+    await vi.advanceTimersByTimeAsync(TALK_STALL_LIMIT_MS - 100); expect(h.options.stallIsFatal!()).toBe(false);
+    await vi.advanceTimersByTimeAsync(200); expect(h.options.stallIsFatal!()).toBe(true);
+    h.session.releaseTalk(); await vi.advanceTimersByTimeAsync(1100);
+    expect(h.options.stallIsFatal!()).toBe(false); h.session.dispose();
+  });
+
+  it('持續收音的精準模式不受影響：沒有傳入待命設定，5 秒沒有聲音仍照舊停止', async () => {
+    const events: ServerMessage[] = []; let given: CaptureOptions | undefined = { stallIsFatal: () => false };
+    const capture = { prepare: vi.fn(async () => {}), stop: vi.fn(async () => {}),
+      start: vi.fn(async (_next: (data: ArrayBuffer) => void, _onError?: (message: string) => void, options?: CaptureOptions) => { given = options; }) };
+    const stt = { connect: vi.fn(async () => {}), sendAudio: vi.fn(() => true), startActivity: vi.fn(() => true), endActivity: vi.fn(() => true), endAudio: vi.fn(), close: vi.fn() };
+    const session = new BrowserTranslationSession({ apiKey: 'fake-key', direction: 'zh-ja', pair: 'zh-ja', mode: 'saving', listeningMode: 'automatic' },
+      event => events.push(event), { capture, createSTT: () => stt });
+    await session.start(); expect(given).toBeUndefined(); session.dispose();
   });
 });
 

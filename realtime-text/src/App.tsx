@@ -572,7 +572,7 @@ export default function App() {
           </div>
           <p className="precision-cost">{Boolean(usage.reviewRequests) && `總額已含原音翻譯 ${formatTwd(usdToTwd(usage.reviewEstimatedUsd ?? 0, displayRate))}。`}請求進行中先顯示保守估算，再依實際用量更新；失敗與重試也可能計費。費用與預算停止皆為估算，實際以 Google 帳單為準。</p>
         </details>
-        <footer>版本 2.11.1 ·翻譯文字會自動保存在此瀏覽器，按「清除紀錄」即可刪除；原音片段與用量不保存。</footer>
+        <footer>版本 2.11.3 · 翻譯文字會自動保存在此瀏覽器，按「清除紀錄」即可刪除；原音片段與用量不保存。</footer>
       </div>
     </aside>
 

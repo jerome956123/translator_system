@@ -1,5 +1,5 @@
 import { DIRECTIONS, type Direction, type Language, type ServerMessage } from '../../shared/protocol';
-import { AudioCapture, pcmLevel } from '../audio/capture';
+import { AudioCapture, pcmLevel, type CaptureOptions } from '../audio/capture';
 import { RecentAudio } from '../audio/recent-audio';
 import { pricesFor, readableError } from './config';
 import { recentPairs } from './guidance';
@@ -23,9 +23,12 @@ import { plausibleTranslation, strongTextLanguage } from './translation-language
 
 interface Capture {
   prepare: () => Promise<void>;
-  start: (onChunk: (chunk: ArrayBuffer) => void, onError?: (message: string) => void) => Promise<void>;
+  start: (onChunk: (chunk: ArrayBuffer) => void, onError?: (message: string) => void, options?: CaptureOptions) => Promise<void>;
   stop: (flush?: boolean) => Promise<void>;
+  wake?: () => void;
 }
+// 按住說話超過這麼久仍收不到麥克風聲音，才當成收音中斷；待命時收不到不算。
+export const TALK_STALL_LIMIT_MS = 5000;
 interface Dependencies {
   capture?: Capture;
   createSTT?: (callbacks: { onInterim: (text: string, languageCode?: string) => void; onFinal: (text: string, languageCode?: string) => void; onError: (message: string) => void; onTurnComplete?: () => void }) => STTConnection;
@@ -64,6 +67,8 @@ export class BrowserTranslationSession {
   private speechAudioLanguage?: Language;
   /** 面對面對講：按下的那一側決定這句話的語言，不靠辨識猜測。 */
   private turnLanguage?: Language;
+  private talkingSince?: number;
+  private lastChunkAt = 0;
 
   constructor(private settings: SessionSettings, private emit: (event: ServerMessage) => void, dependencies: Dependencies = {}) {
     this.capture = dependencies.capture ?? new AudioCapture(settings.audioSource);
@@ -94,9 +99,11 @@ export class BrowserTranslationSession {
       start: () => {
         this.assembler.beginTurn(); this.speechAudioLanguage = undefined;
         this.lastTranscriptAt = Date.now(); this.signalSeconds = 0; this.warnedNoTranscript = false;
+        this.talkingSince = Date.now();
         return this.stt.startActivity();
       },
       audio: chunk => this.sendAudio(chunk), end: () => {
+        this.talkingSince = undefined;
         const sent = this.stt.endActivity(); this.sendUsage(); return sent;
       },
       state: state => this.send({ type: 'talk-state', sessionId: this.id, state }),
@@ -204,7 +211,15 @@ export class BrowserTranslationSession {
       const connection = this.ptt
         ? this.stt.connect(this.settings.apiKey, language, this.settings.customVocabulary, true)
         : this.stt.connect(this.settings.apiKey, language, this.settings.customVocabulary);
-      const capture = this.capture.start(chunk => this.audio(chunk), message => { if (!this.stopping) this.fail(message); });
+      const capture = this.capture.start(chunk => this.audio(chunk), message => { if (!this.stopping) this.fail(message); }, this.ptt ? {
+        // 待命時沒有按住，聲音本來就不送出：手機暫停收音不必結束對講，等它恢復或下次按下時叫醒。
+        stallIsFatal: () => this.talkingSince !== undefined && Date.now() - this.talkingSince > TALK_STALL_LIMIT_MS,
+        onStall: stalled => {
+          if (this.stopping || this.disposed) return;
+          if (stalled) this.send({ type: 'warning', sessionId: this.id, message: '麥克風暫時沒有送出聲音，正在嘗試恢復；按住說話時也會再啟動一次。' });
+          else this.status('listening', '麥克風已恢復，可以繼續按住說話。');
+        },
+      } : undefined);
       await Promise.all([connection, capture]);
       if (this.stopping || this.disposed) return;
       this.ready = true;
@@ -235,6 +250,7 @@ export class BrowserTranslationSession {
     if (this.disposed) return;
     this.recentAudio.append(chunk);
     const now = Date.now();
+    this.lastChunkAt = now;
     if (now - this.lastLevelAt >= 200) {
       this.lastLevelAt = now;
       this.send({ type: 'audio-level', sessionId: this.id, level: pcmLevel(chunk) });
@@ -261,6 +277,8 @@ export class BrowserTranslationSession {
     // 上一句還沒收完時，另一側不能接進同一句，否則兩種語言會混成一句。
     if (this.ptt.pending && language !== this.turnLanguage) return false;
     this.turnLanguage = language;
+    // 收音暫停過：趁這次按下把麥克風叫醒，並丟掉暫停前留下的過時聲音。
+    if (Date.now() - this.lastChunkAt > 1000) { this.capture.wake?.(); if (!this.ptt.pending) this.ptt.discardPreRoll(); }
     return this.ptt.press();
   }
   releaseTalk() { this.ptt?.release(); }
