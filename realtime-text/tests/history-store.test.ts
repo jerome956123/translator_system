@@ -3,7 +3,7 @@ import { clearCaptions, HISTORY_STORAGE_KEY, loadCaptions, saveCaptions } from '
 import { pairPreference, qualityPreference, pacePreference, themePreference, audioSourcePreference, showOriginalPreference,
   autoResumePreference, autoSpeakPreference, loadBudget, saveBudget, loadFontScale, saveFontScale, clampFontScale } from '../src/lib/preferences';
 import { resumeOnReturn, RESUME_WINDOW_MS } from '../src/lib/page-visibility';
-import { speak, speechSupported, stopSpeaking, voiceLang } from '../src/lib/speech';
+import { speak, speechSupported, stopSpeaking, unlockSpeech, voiceLang, SPEAK_AFTER_CANCEL_MS } from '../src/lib/speech';
 import type { Caption } from '../src/lib/types';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -91,19 +91,47 @@ describe('朗讀譯文', () => {
   it('不支援語音合成的環境安靜略過', () => {
     expect(speechSupported()).toBe(false); expect(speak('你好', 'zh-Hant-TW')).toBe(false); expect(() => stopSpeaking()).not.toThrow();
   });
-  it('依目標語言選擇語音，新的朗讀取代進行中的內容，空白文字不朗讀', () => {
-    const spoken: { text: string; lang: string; voice?: { lang: string } }[] = [];
-    class Utterance { lang = ''; voice?: { lang: string }; onend?: () => void; onerror?: () => void; constructor(public text: string) {} }
-    const synth = { cancel: vi.fn(), speak: vi.fn((item: Utterance) => { spoken.push(item); item.onend?.(); }),
+  class Utterance { lang = ''; volume = 1; voice?: { lang: string }; onstart?: () => void; onend?: () => void; onerror?: () => void; constructor(public text: string) {} }
+  function fakeSynth(play: (item: Utterance) => void = item => item.onend?.()) {
+    const spoken: Utterance[] = [];
+    const synth = { speaking: false, pending: false, cancel: vi.fn(), speak: vi.fn((item: Utterance) => { spoken.push(item); play(item); }),
       getVoices: () => [{ lang: 'en-US' }, { lang: 'ja_JP' }, { lang: 'zh-TW' }] };
     vi.stubGlobal('window', { speechSynthesis: synth }); vi.stubGlobal('SpeechSynthesisUtterance', Utterance);
+    return { synth, spoken };
+  }
+  it('依目標語言選擇語音，空白文字不朗讀；沒有在唸時不呼叫 cancel', () => {
+    const { synth, spoken } = fakeSynth();
     expect(speechSupported()).toBe(true);
     const done = vi.fn();
     expect(speak('  来週、\n青森に行きます。 ', 'ja', done)).toBe(true);
     expect(spoken[0]).toMatchObject({ text: '来週、 青森に行きます。', lang: 'ja-JP', voice: { lang: 'ja_JP' } });
-    expect(synth.cancel).toHaveBeenCalledOnce(); expect(done).toHaveBeenCalledOnce();
+    expect(done).toHaveBeenCalledOnce();
     expect(speak('下週要去青森。', 'zh-Hant-TW')).toBe(true); expect(spoken[1]).toMatchObject({ lang: 'zh-TW', voice: { lang: 'zh-TW' } });
     expect(speak('   ', 'en')).toBe(false); expect(synth.speak).toHaveBeenCalledTimes(2);
+    stopSpeaking(); expect(synth.cancel).not.toHaveBeenCalled();
     expect([voiceLang('en'), voiceLang('ja'), voiceLang('fr-FR')]).toEqual(['en-US', 'ja-JP', 'fr-FR']);
+  });
+  it('正在唸時先取消、稍候才唸新的內容；等待期間按停止就不會再唸', () => {
+    vi.useFakeTimers();
+    try {
+      const { synth, spoken } = fakeSynth(() => {});
+      synth.speaking = true;
+      expect(speak('first', 'en')).toBe(true);
+      expect(synth.cancel).toHaveBeenCalledOnce(); expect(synth.speak).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(SPEAK_AFTER_CANCEL_MS); expect(spoken.map(item => item.text)).toEqual(['first']);
+      speak('second', 'en'); speak('third', 'en');
+      vi.advanceTimersByTime(SPEAK_AFTER_CANCEL_MS); expect(spoken.map(item => item.text)).toEqual(['first', 'third']);
+      speak('fourth', 'en'); stopSpeaking();
+      vi.advanceTimersByTime(SPEAK_AFTER_CANCEL_MS * 3); expect(synth.speak).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+  it('解鎖語音：點按時送出無聲語音，瀏覽器接受之前每次點按都重試，接受後不再送', () => {
+    let accept = false;
+    const { synth, spoken } = fakeSynth(item => { if (accept) item.onstart?.(); });
+    unlockSpeech(); unlockSpeech();
+    expect(synth.speak).toHaveBeenCalledTimes(2); expect(spoken[0]).toMatchObject({ text: '', volume: 0 });
+    synth.speaking = true; unlockSpeech(); expect(synth.speak).toHaveBeenCalledTimes(2);
+    synth.speaking = false; accept = true; unlockSpeech(); expect(synth.speak).toHaveBeenCalledTimes(3);
+    unlockSpeech(); expect(synth.speak).toHaveBeenCalledTimes(3);
   });
 });

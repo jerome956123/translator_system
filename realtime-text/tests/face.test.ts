@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrowserTranslationSession } from '../src/lib/session';
 import type { Direction, ServerMessage } from '../shared/protocol';
 import { FACE_TEXT, faceButtonState, faceLanguages, faceLines, faceTurns } from '../src/lib/face';
-import { faceFlipPreference, faceNearPreference, loadTranslationMode, saveTranslationMode } from '../src/lib/preferences';
+import { faceFlipPreference, faceNearPreference, faceSpeakPreference, loadTranslationMode, saveTranslationMode } from '../src/lib/preferences';
 import type { Caption } from '../src/lib/types';
 
 function harness() {
@@ -138,5 +138,8 @@ describe('面對面對講：記住的選擇', () => {
     faceNearPreference.save('ja', storage); expect(faceNearPreference.load(storage)).toBe('ja');
     expect(faceFlipPreference.load(storage)).toBe('auto');
     faceFlipPreference.save('off', storage); expect(faceFlipPreference.load(storage)).toBe('off');
+    // 自動朗讀預設關閉，勾選後才記住為開啟。
+    expect(faceSpeakPreference.load(storage)).toBe(false);
+    faceSpeakPreference.save(true, storage); expect(faceSpeakPreference.load(storage)).toBe(true);
   });
 });

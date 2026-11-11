@@ -23,7 +23,7 @@ import { PushToTalkButton } from './PushToTalkButton';
 import { FaceToFace } from './FaceToFace';
 import { faceLanguages } from './lib/face';
 import { watchPageInactivity } from './lib/page-inactivity';
-import { speak, speechSupported, stopSpeaking } from './lib/speech';
+import { speak, speechSupported, stopSpeaking, unlockSpeech } from './lib/speech';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped' | 'error';
 const LABEL: Record<Status, string> = {
@@ -239,9 +239,16 @@ export default function App() {
     hiddenStopAt.current = undefined;
     if (statusRef.current === 'finishing') return;
     if (ACTIVE.includes(statusRef.current)) void session.current?.stop();
-    else start();
+    else { start(); primeSpeech(); }
   }
   const toggleRef = useRef(toggle); toggleRef.current = toggle;
+
+  // 自動朗讀要先在點按的當下解鎖語音，手機才允許之後由程式開始朗讀。
+  function primeSpeech(enabled = manual && speakAuto) { if (enabled) unlockSpeech(); }
+  function releaseTalk() {
+    if (session.current instanceof BrowserTranslationSession) session.current.releaseTalk();
+    primeSpeech();
+  }
 
   function closeFace() {
     faceOpenRef.current = false; setFaceOpen(false);
@@ -466,7 +473,7 @@ export default function App() {
           }} />對面那一半上下顛倒（手機平放在兩人中間時使用）</label>
           {canSpeak && <label className="switch"><input type="checkbox" checked={faceSpeak} onChange={event => {
             setFaceSpeak(event.target.checked); faceSpeakPreference.save(event.target.checked);
-            if (!event.target.checked) { stopSpeaking(); setSpeakingId(null); }
+            if (!event.target.checked) { stopSpeaking(); setSpeakingId(null); } else primeSpeech(true);
           }} />翻譯完成後自動朗讀給對方聽</label>}
         </section>
         : manual ? <section className="mode-options">
@@ -474,7 +481,7 @@ export default function App() {
             <p>按住時邊說邊顯示原文和譯文，放開後等待定稿再講下一句。會保留按下前最多 0.8 秒及放開後約 0.3 秒的聲音；待命時麥克風開著，但沒有按住的聲音不會送出。電腦可按 Ctrl＋Enter 開始或停止待命。</p></details>
           {canSpeak && <label className="switch"><input type="checkbox" checked={autoSpeak} onChange={event => {
             setAutoSpeak(event.target.checked); autoSpeakPreference.save(event.target.checked);
-            if (!event.target.checked) { stopSpeaking(); setSpeakingId(null); }
+            if (!event.target.checked) { stopSpeaking(); setSpeakingId(null); } else primeSpeech(true);
           }} />每句完成後自動朗讀譯文</label>}
         </section>
         : <details className="mode-help"><summary>持續收音，約 {firstText} 秒出現一段譯文，之後會依後文自動校對。<em>運作方式</em></summary>
@@ -565,7 +572,7 @@ export default function App() {
           </div>
           <p className="precision-cost">{Boolean(usage.reviewRequests) && `總額已含原音翻譯 ${formatTwd(usdToTwd(usage.reviewEstimatedUsd ?? 0, displayRate))}。`}請求進行中先顯示保守估算，再依實際用量更新；失敗與重試也可能計費。費用與預算停止皆為估算，實際以 Google 帳單為準。</p>
         </details>
-        <footer>版本 2.11.0 · 翻譯文字會自動保存在此瀏覽器，按「清除紀錄」即可刪除；原音片段與用量不保存。</footer>
+        <footer>版本 2.11.1 ·翻譯文字會自動保存在此瀏覽器，按「清除紀錄」即可刪除；原音片段與用量不保存。</footer>
       </div>
     </aside>
 
@@ -620,7 +627,7 @@ export default function App() {
         {manual && !face && <div className="talk-bar manual-controls">
           <PushToTalkButton disabled={status !== 'listening' || talkState === 'finishing' || talkState === 'closed'} state={talkState}
             onPress={() => { stopSpeaking(); setSpeakingId(null); return session.current instanceof BrowserTranslationSession && session.current.pressTalk(); }}
-            onRelease={() => { if (session.current instanceof BrowserTranslationSession) session.current.releaseTalk(); }} />
+            onRelease={releaseTalk} />
         </div>}
         <div className="export-actions"><button disabled={!textOutput} onClick={() => void navigator.clipboard.writeText(textOutput)
           .then(() => setMessage('字幕已複製。')).catch(() => setMessage('瀏覽器無法複製，請使用下載 TXT。'))}>複製文字</button>
@@ -632,10 +639,10 @@ export default function App() {
     {faceOpen && <FaceToFace near={sides.near} far={sides.far} flip={flip} captions={faceCaptions}
       listening={status === 'listening'} ended={!running} failed={status === 'error'} finishing={status === 'finishing'} message={message}
       talkState={talkState} speaker={talkSpeaker} canSpeak={canSpeak} autoSpeak={faceSpeak} fontScale={fontScale}
-      onPress={pressFace} onRelease={() => { if (session.current instanceof BrowserTranslationSession) session.current.releaseTalk(); }}
+      onPress={pressFace} onRelease={releaseTalk}
       onSwap={() => { const next = sides.far; setFaceNear(next); faceNearPreference.save(next); }}
       onFlip={() => { const next = flip ? 'off' : 'on'; setFaceFlip(next); faceFlipPreference.save(next); }}
-      onAutoSpeak={value => { setFaceSpeak(value); faceSpeakPreference.save(value); if (!value) { stopSpeaking(); setSpeakingId(null); } }}
-      onRestart={() => start()} onClose={closeFace} />}
+      onAutoSpeak={value => { setFaceSpeak(value); faceSpeakPreference.save(value); if (!value) { stopSpeaking(); setSpeakingId(null); } else primeSpeech(true); }}
+      onRestart={() => { start(); primeSpeech(); }} onClose={closeFace} />}
   </main>;
 }

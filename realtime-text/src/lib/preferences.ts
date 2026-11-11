@@ -81,7 +81,7 @@ const isLanguage = (value: unknown): value is Language => value === 'zh' || valu
 const isFaceFlip = (value: unknown): value is FaceFlip => value === 'auto' || value === 'on' || value === 'off';
 export const faceNearPreference = choice<Language>('realtime-translator.face-near.v1', isLanguage, 'zh');
 export const faceFlipPreference = choice<FaceFlip>('realtime-translator.face-flip.v1', isFaceFlip, 'auto');
-export const faceSpeakPreference = flag('realtime-translator.face-speak.v1', true);
+export const faceSpeakPreference = flag('realtime-translator.face-speak.v1', false);
 const BUDGET_STORAGE_KEY = 'realtime-translator.budget-twd.v1';
 export const loadBudget = (storage?: KeyStorage) => loadPreference(BUDGET_STORAGE_KEY, storage).slice(0, 12);
 export const saveBudget = (value: string, storage?: KeyStorage) => savePreference(BUDGET_STORAGE_KEY, value.slice(0, 12), storage);
