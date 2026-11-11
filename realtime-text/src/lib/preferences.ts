@@ -1,5 +1,5 @@
 import { DEFAULT_USD_TWD, validExchangeRate } from './currency';
-import { LANGUAGE_PAIRS, type AudioSource, type LanguagePair, type ListeningMode, type TranslationMode } from '../../shared/protocol';
+import { LANGUAGE_PAIRS, type AudioSource, type Language, type LanguagePair, type ListeningMode, type TranslationMode } from '../../shared/protocol';
 import { isPace, isQuality, type Pace, type Quality } from './config';
 import { cleanScene, isJapaneseRegister, type JapaneseRegister } from './guidance';
 
@@ -36,7 +36,10 @@ export const loadPrecisionReview = (storage?: KeyStorage) => loadPreference(PREC
 export const savePrecisionReview = (value: boolean, storage?: KeyStorage) => savePreference(PRECISION_STORAGE_KEY, value ? 'on' : '', storage);
 export const loadListeningMode = (storage?: KeyStorage): ListeningMode => loadPreference(LISTENING_STORAGE_KEY, storage) === 'automatic' ? 'automatic' : 'push-to-talk';
 export const saveListeningMode = (value: ListeningMode, storage?: KeyStorage) => savePreference(LISTENING_STORAGE_KEY, value, storage);
-export const loadTranslationMode = (storage?: KeyStorage): TranslationMode => loadPreference(TRANSLATION_MODE_KEY, storage) === 'push-to-talk' ? 'push-to-talk' : 'precision';
+export function loadTranslationMode(storage?: KeyStorage): TranslationMode {
+  const saved = loadPreference(TRANSLATION_MODE_KEY, storage);
+  return saved === 'push-to-talk' || saved === 'face-to-face' ? saved : 'precision';
+}
 export const saveTranslationMode = (value: TranslationMode, storage?: KeyStorage) => savePreference(TRANSLATION_MODE_KEY, value, storage);
 export const loadScene = (storage?: KeyStorage) => cleanScene(loadPreference(SCENE_STORAGE_KEY, storage));
 export const saveScene = (value: string, storage?: KeyStorage) => savePreference(SCENE_STORAGE_KEY, cleanScene(value), storage);
@@ -72,6 +75,13 @@ export const audioSourcePreference = choice<AudioSource>('realtime-translator.au
 export const showOriginalPreference = flag('realtime-translator.show-original.v1', true);
 export const autoResumePreference = flag('realtime-translator.auto-resume.v1', true);
 export const autoSpeakPreference = flag('realtime-translator.auto-speak.v1', false);
+// 面對面對講：自己這一側的語言，以及對面那一半是否上下顛倒（auto 表示觸控裝置才顛倒）。
+export type FaceFlip = 'auto' | 'on' | 'off';
+const isLanguage = (value: unknown): value is Language => value === 'zh' || value === 'ja' || value === 'en';
+const isFaceFlip = (value: unknown): value is FaceFlip => value === 'auto' || value === 'on' || value === 'off';
+export const faceNearPreference = choice<Language>('realtime-translator.face-near.v1', isLanguage, 'zh');
+export const faceFlipPreference = choice<FaceFlip>('realtime-translator.face-flip.v1', isFaceFlip, 'auto');
+export const faceSpeakPreference = flag('realtime-translator.face-speak.v1', true);
 const BUDGET_STORAGE_KEY = 'realtime-translator.budget-twd.v1';
 export const loadBudget = (storage?: KeyStorage) => loadPreference(BUDGET_STORAGE_KEY, storage).slice(0, 12);
 export const saveBudget = (value: string, storage?: KeyStorage) => savePreference(BUDGET_STORAGE_KEY, value.slice(0, 12), storage);

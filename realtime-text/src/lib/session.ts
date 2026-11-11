@@ -62,6 +62,8 @@ export class BrowserTranslationSession {
   private edited = new Map<string, { original: string; translation: string; direction: Direction }>();
   private previousLanguage: Language;
   private speechAudioLanguage?: Language;
+  /** 面對面對講：按下的那一側決定這句話的語言，不靠辨識猜測。 */
+  private turnLanguage?: Language;
 
   constructor(private settings: SessionSettings, private emit: (event: ServerMessage) => void, dependencies: Dependencies = {}) {
     this.capture = dependencies.capture ?? new AudioCapture(settings.audioSource);
@@ -252,7 +254,15 @@ export class BrowserTranslationSession {
 
   get recentAudioSeconds() { return this.recentAudio.durationSeconds; }
   snapshotAudio() { return this.recentAudio.snapshot(); }
-  pressTalk() { return this.ready && !this.stopping && !this.disposed && Boolean(this.ptt?.press()); }
+  /** speaker：面對面對講時由按下的那一側指定說話者的語言；一般按住說話不帶。 */
+  pressTalk(speaker?: Language) {
+    if (!this.ready || this.stopping || this.disposed || !this.ptt) return false;
+    const language = this.settings.pair && isPairLanguage(speaker, this.settings.pair) ? speaker : undefined;
+    // 上一句還沒收完時，另一側不能接進同一句，否則兩種語言會混成一句。
+    if (this.ptt.pending && language !== this.turnLanguage) return false;
+    this.turnLanguage = language;
+    return this.ptt.press();
+  }
   releaseTalk() { this.ptt?.release(); }
 
   private sendAudio(chunk: ArrayBuffer) {
@@ -285,7 +295,9 @@ export class BrowserTranslationSession {
     if (this.settings.pair && isPairLanguage(detected, this.settings.pair)) this.speechAudioLanguage = detected;
     const strong = this.settings.pair ? strongTextLanguage(text, this.settings.pair) : undefined;
     // Contradictory script evidence must not force an incorrect ASR language into the text model.
-    const audioLanguage = this.settings.pair && (!strong || strong === this.speechAudioLanguage) ? this.speechAudioLanguage : undefined;
+    // 指定了說話者語言時以它為準；文字明顯是另一種語言（按錯邊）才退回自動判斷。
+    const heard = this.turnLanguage ?? this.speechAudioLanguage;
+    const audioLanguage = this.settings.pair && (!strong || strong === heard) ? heard : undefined;
     const direction = this.settings.pair
       ? audioLanguage ? directionFor(this.settings.pair, audioLanguage) : previewDirection(text, this.settings.pair, this.previousLanguage)
       : this.settings.direction;

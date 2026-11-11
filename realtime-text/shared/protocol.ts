@@ -18,7 +18,7 @@ export type LanguagePair = keyof typeof LANGUAGE_PAIRS;
 export type Mode = 'saving' | 'fast';
 export type AudioSource = 'microphone' | 'display';
 export type ListeningMode = 'automatic' | 'push-to-talk';
-export type TranslationMode = 'precision' | 'push-to-talk';
+export type TranslationMode = 'precision' | 'push-to-talk' | 'face-to-face';
 export type TalkState = 'idle' | 'speaking' | 'tail' | 'finishing' | 'closed';
 
 export interface PrecisionSegment {
