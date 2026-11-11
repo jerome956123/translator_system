@@ -3,7 +3,7 @@ import { clearCaptions, HISTORY_STORAGE_KEY, loadCaptions, saveCaptions } from '
 import { pairPreference, qualityPreference, pacePreference, themePreference, audioSourcePreference, showOriginalPreference,
   autoResumePreference, autoSpeakPreference, loadBudget, saveBudget, loadFontScale, saveFontScale, clampFontScale } from '../src/lib/preferences';
 import { resumeOnReturn, RESUME_WINDOW_MS } from '../src/lib/page-visibility';
-import { speak, speechSupported, stopSpeaking, unlockSpeech, voiceLang, SPEAK_AFTER_CANCEL_MS, SPEAK_START_TIMEOUT_MS } from '../src/lib/speech';
+import { speak, speechSupported, stopSpeaking, unlockSpeech, voiceLang, SPEAK_AFTER_CANCEL_MS } from '../src/lib/speech';
 import type { Caption } from '../src/lib/types';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -91,7 +91,7 @@ describe('朗讀譯文', () => {
   it('不支援語音合成的環境安靜略過', () => {
     expect(speechSupported()).toBe(false); expect(speak('你好', 'zh-Hant-TW')).toBe(false); expect(() => stopSpeaking()).not.toThrow();
   });
-  class Utterance { lang = ''; volume = 1; voice?: { lang: string }; onstart?: () => void; onend?: () => void; onerror?: (event?: { error?: string }) => void; constructor(public text: string) {} }
+  class Utterance { lang = ''; volume = 1; voice?: { lang: string }; onstart?: () => void; onend?: () => void; onerror?: () => void; constructor(public text: string) {} }
   function fakeSynth(play: (item: Utterance) => void = item => item.onend?.()) {
     const spoken: Utterance[] = [];
     const synth = { speaking: false, pending: false, cancel: vi.fn(), speak: vi.fn((item: Utterance) => { spoken.push(item); play(item); }),
@@ -99,40 +99,17 @@ describe('朗讀譯文', () => {
     vi.stubGlobal('window', { speechSynthesis: synth }); vi.stubGlobal('SpeechSynthesisUtterance', Utterance);
     return { synth, spoken };
   }
-  it('只指定目標語言、語音交給裝置挑選，空白文字不朗讀；沒有在唸時不呼叫 cancel', () => {
+  it('依目標語言選擇語音，空白文字不朗讀；沒有在唸時不呼叫 cancel', () => {
     const { synth, spoken } = fakeSynth();
     expect(speechSupported()).toBe(true);
     const done = vi.fn();
     expect(speak('  来週、\n青森に行きます。 ', 'ja', done)).toBe(true);
-    expect(spoken[0]).toMatchObject({ text: '来週、 青森に行きます。', lang: 'ja-JP' }); expect(spoken[0].voice).toBeUndefined();
-    expect(done).toHaveBeenCalledOnce(); expect(done).toHaveBeenCalledWith(undefined);
-    expect(speak('下週要去青森。', 'zh-Hant-TW')).toBe(true); expect(spoken[1]).toMatchObject({ lang: 'zh-TW' });
+    expect(spoken[0]).toMatchObject({ text: '来週、 青森に行きます。', lang: 'ja-JP', voice: { lang: 'ja_JP' } });
+    expect(done).toHaveBeenCalledOnce();
+    expect(speak('下週要去青森。', 'zh-Hant-TW')).toBe(true); expect(spoken[1]).toMatchObject({ lang: 'zh-TW', voice: { lang: 'zh-TW' } });
     expect(speak('   ', 'en')).toBe(false); expect(synth.speak).toHaveBeenCalledTimes(2);
     stopSpeaking(); expect(synth.cancel).not.toHaveBeenCalled();
     expect([voiceLang('en'), voiceLang('ja'), voiceLang('fr-FR')]).toEqual(['en-US', 'ja-JP', 'fr-FR']);
-  });
-  it('裝置沒有回應時 5 秒後回報「沒有開始」；有開始就不算，瀏覽器回報的錯誤照實回報', () => {
-    vi.useFakeTimers();
-    try {
-      const silent = fakeSynth(() => {});
-      const stuck = vi.fn();
-      speak('沒有回應', 'zh-Hant-TW', stuck);
-      vi.advanceTimersByTime(SPEAK_START_TIMEOUT_MS - 1); expect(stuck).not.toHaveBeenCalled();
-      vi.advanceTimersByTime(1); expect(stuck).toHaveBeenCalledExactlyOnceWith('not-started');
-      silent.spoken[0].onend?.(); expect(stuck).toHaveBeenCalledOnce();
-
-      const started = fakeSynth(item => item.onstart?.());
-      const long = vi.fn();
-      speak('很長的一段話', 'zh-Hant-TW', long);
-      vi.advanceTimersByTime(SPEAK_START_TIMEOUT_MS * 4); expect(long).not.toHaveBeenCalled();
-      started.spoken[0].onend?.(); expect(long).toHaveBeenCalledExactlyOnceWith(undefined);
-
-      fakeSynth(item => item.onerror?.({ error: 'synthesis-failed' }));
-      const failed = vi.fn(); speak('失敗', 'ja', failed); expect(failed).toHaveBeenCalledExactlyOnceWith('synthesis-failed');
-      fakeSynth(item => item.onerror?.({ error: 'canceled' }));
-      const cancelled = vi.fn(); speak('被取消', 'ja', cancelled); expect(cancelled).toHaveBeenCalledExactlyOnceWith(undefined);
-      vi.advanceTimersByTime(SPEAK_START_TIMEOUT_MS * 2); expect(cancelled).toHaveBeenCalledOnce();
-    } finally { vi.useRealTimers(); }
   });
   it('正在唸時先取消、稍候才唸新的內容；等待期間按停止就不會再唸', () => {
     vi.useFakeTimers();

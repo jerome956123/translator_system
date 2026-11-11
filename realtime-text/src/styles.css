@@ -106,7 +106,6 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); box-sha
 .mode-options { display: grid; gap: 12px; padding: 14px 16px; color: var(--muted); font-size: 13px; line-height: 1.7; }
 .mode-options > p { margin: 0; }
 .mode-options .mode-help { padding: 0; }
-.mode-options .speech-hint { margin-top: -6px; padding-left: 24px; color: var(--warn); font-size: 12px; }
 .source-hint { margin: 0; padding: 0 4px; color: var(--muted); font-size: 13px; line-height: 1.65; }
 
 /* 設定收成一張清單：每一列點開才看到內容。 */

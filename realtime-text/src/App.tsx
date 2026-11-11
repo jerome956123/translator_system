@@ -23,7 +23,7 @@ import { PushToTalkButton } from './PushToTalkButton';
 import { FaceToFace } from './FaceToFace';
 import { faceLanguages } from './lib/face';
 import { watchPageInactivity } from './lib/page-inactivity';
-import { appleMobile, speak, speechSupported, stopSpeaking, unlockSpeech } from './lib/speech';
+import { speak, speechSupported, stopSpeaking, unlockSpeech } from './lib/speech';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped' | 'error';
 const LABEL: Record<Status, string> = {
@@ -32,7 +32,6 @@ const LABEL: Record<Status, string> = {
 };
 const ACTIVE: Status[] = ['connecting', 'ready', 'listening', 'finishing'];
 const THEMES: Record<Theme, string> = { auto: '跟隨系統', dark: '深色', light: '淺色' };
-const SILENT_HINT = 'iPhone 沒有聲音時，請關閉靜音模式（側邊開關或控制中心的鈴聲圖示）並調高音量。';
 
 function FlowingCaption({ captions, field }: { captions: Caption[]; field: 'original' | 'translation' | 'recognition' }) {
   let previous = '';
@@ -113,8 +112,6 @@ export default function App() {
   const wakeLock = useRef<WakeLockSentinel | null>(null);
   const hiddenStopAt = useRef<number | undefined>(undefined);
   const spoken = useRef(new Set<string>());
-  const speechHinted = useRef(false);
-  const iphone = useMemo(() => appleMobile(), []);
   const faceOpenRef = useRef(false);
   const faceSince = useRef(0);
   const latestCaptions = useRef(captions); latestCaptions.current = captions;
@@ -347,9 +344,8 @@ export default function App() {
     for (const item of ready) spoken.current.add(item.id);
     const last = ready.at(-1)!;
     const paragraph = paragraphs.find(group => group.captions.some(caption => caption.id === last.id));
-    if (speak(ready.map(item => item.translation).join(' '), targetLang(last.direction), problem => { setSpeakingId(null); speechEnded(problem); })) {
-      setSpeakingId(paragraph?.id ?? null); speechStarted();
-    }
+    if (speak(ready.map(item => item.translation).join(' '), targetLang(last.direction), () => setSpeakingId(null)))
+      setSpeakingId(paragraph?.id ?? null);
   }, [captions, paragraphs, talkState, speakAuto, manual, status, canSpeak]);
 
   // Replacing/clearing a clip releases its URL, including on unmount. Nothing goes to storage.
@@ -375,20 +371,8 @@ export default function App() {
   const speakAllowed = canSpeak && (!running || (manual && talkState === 'idle'));
   function toggleSpeak(item: CaptionParagraph) {
     if (speakingId === item.id) { stopSpeaking(); setSpeakingId(null); return; }
-    if (speak(item.translation, targetLang(item.direction), problem => {
-      setSpeakingId(current => current === item.id ? null : current); speechEnded(problem);
-    })) { setSpeakingId(item.id); speechStarted(); }
-  }
-
-  // 朗讀沒有正常唸完時把原因顯示出來，不讓按鈕停在「停止朗讀」卻沒有任何說明。
-  function speechEnded(problem?: string) {
-    if (problem === 'not-started') setMessage('這台裝置沒有開始朗讀。請再按一次「朗讀」；若仍沒有反應，請重新整理頁面後再試。');
-    else if (problem) setMessage(`朗讀失敗（${problem}）。請確認裝置有這個語言的語音，並重新整理後再試。`);
-  }
-  // iPhone 的靜音模式會讓朗讀沒有聲音，網頁偵測不到，第一次朗讀時提醒一次。
-  function speechStarted() {
-    if (!iphone || speechHinted.current) return;
-    speechHinted.current = true; setMessage(`正在朗讀。${SILENT_HINT}`);
+    if (speak(item.translation, targetLang(item.direction), () => setSpeakingId(current => current === item.id ? null : current)))
+      setSpeakingId(item.id);
   }
 
   function changeFontScale(delta: number) {
@@ -491,7 +475,6 @@ export default function App() {
             setFaceSpeak(event.target.checked); faceSpeakPreference.save(event.target.checked);
             if (!event.target.checked) { stopSpeaking(); setSpeakingId(null); } else primeSpeech(true);
           }} />翻譯完成後自動朗讀給對方聽</label>}
-          {canSpeak && iphone && faceSpeak && <p className="speech-hint">{SILENT_HINT}</p>}
         </section>
         : manual ? <section className="mode-options">
           <details className="mode-help"><summary>先按「開始待命」，再按住空白鍵或字幕下方的按鈕說話，放開結束這句。<em>運作方式</em></summary>
@@ -500,7 +483,6 @@ export default function App() {
             setAutoSpeak(event.target.checked); autoSpeakPreference.save(event.target.checked);
             if (!event.target.checked) { stopSpeaking(); setSpeakingId(null); } else primeSpeech(true);
           }} />每句完成後自動朗讀譯文</label>}
-          {canSpeak && iphone && autoSpeak && <p className="speech-hint">{SILENT_HINT}</p>}
         </section>
         : <details className="mode-help"><summary>持續收音，約 {firstText} 秒出現一段譯文，之後會依後文自動校對。<em>運作方式</em></summary>
           <p>約 {rhythm.minSeconds}–{rhythm.maxSeconds} 秒優先在停頓處分段，再等 {rhythm.lookaheadSeconds} 秒後文交給 AI。下一段會重聽前段並校對，所以最新一段的譯文可能更新；重聽的用量計入費用。
@@ -590,7 +572,7 @@ export default function App() {
           </div>
           <p className="precision-cost">{Boolean(usage.reviewRequests) && `總額已含原音翻譯 ${formatTwd(usdToTwd(usage.reviewEstimatedUsd ?? 0, displayRate))}。`}請求進行中先顯示保守估算，再依實際用量更新；失敗與重試也可能計費。費用與預算停止皆為估算，實際以 Google 帳單為準。</p>
         </details>
-        <footer>版本 2.11.2 · 翻譯文字會自動保存在此瀏覽器，按「清除紀錄」即可刪除；原音片段與用量不保存。</footer>
+        <footer>版本 2.11.1 ·翻譯文字會自動保存在此瀏覽器，按「清除紀錄」即可刪除；原音片段與用量不保存。</footer>
       </div>
     </aside>
 

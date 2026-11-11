@@ -1,6 +1,6 @@
 {
   "name": "gemini-realtime-text-translator",
-  "version": "2.11.2",
+  "version": "2.11.1",
   "private": true,
   "type": "module",
   "scripts": {
