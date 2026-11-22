@@ -464,7 +464,7 @@ export default function App() {
         </section>
 
         {face ? <section className="mode-options">
-          <p>按「開始對講」後畫面分成兩半，手機放在兩人中間，各自按住靠近自己的按鈕說話；放開後，對方那一半會顯示翻譯。按哪一邊就當作哪一種語言，不必等系統判斷。</p>
+          <p>按「開始對講」後畫面分成兩半，手機放在兩人中間，各自按住靠近自己的按鈕說話；放開後，對方那一半會顯示翻譯。也可以按一下開始、說完再按一下結束。按哪一邊就當作哪一種語言，不必等系統判斷。</p>
           <label>我這一側的語言<select value={sides.near} disabled={running} onChange={event => {
             const next = event.target.value as Language; setFaceNear(next); faceNearPreference.save(next);
           }}>{LANGUAGE_PAIRS[pair].languages.map(language => <option value={language} key={language}>{LANGUAGE_LABELS[language]}</option>)}</select></label>
@@ -477,8 +477,8 @@ export default function App() {
           }} />翻譯完成後自動朗讀給對方聽</label>}
         </section>
         : manual ? <section className="mode-options">
-          <details className="mode-help"><summary>先按「開始待命」，再按住空白鍵或字幕下方的按鈕說話，放開結束這句。<em>運作方式</em></summary>
-            <p>按住時邊說邊顯示原文和譯文，放開後等待定稿再講下一句。會保留按下前最多 0.8 秒及放開後約 0.3 秒的聲音；待命時麥克風開著，但沒有按住的聲音不會送出。電腦可按 Ctrl＋Enter 開始或停止待命。</p></details>
+          <details className="mode-help"><summary>先按「開始待命」，再按住空白鍵或字幕下方的按鈕說話，放開結束這句；也可以按一下開始、再按一下結束。<em>運作方式</em></summary>
+            <p>按住時邊說邊顯示原文和譯文，放開後等待定稿再講下一句。很快按一下（不到 0.4 秒就放開）會持續收音，適合把手機放著讓對方說完，再按一下才結束；按鈕會顯示「再按一下結束」。會保留按下前最多 0.8 秒及放開後約 0.3 秒的聲音；待命時麥克風開著，但沒有按住的聲音不會送出。電腦可按 Ctrl＋Enter 開始或停止待命。</p></details>
           {canSpeak && <label className="switch"><input type="checkbox" checked={autoSpeak} onChange={event => {
             setAutoSpeak(event.target.checked); autoSpeakPreference.save(event.target.checked);
             if (!event.target.checked) { stopSpeaking(); setSpeakingId(null); } else primeSpeech(true);
@@ -572,7 +572,7 @@ export default function App() {
           </div>
           <p className="precision-cost">{Boolean(usage.reviewRequests) && `總額已含原音翻譯 ${formatTwd(usdToTwd(usage.reviewEstimatedUsd ?? 0, displayRate))}。`}請求進行中先顯示保守估算，再依實際用量更新；失敗與重試也可能計費。費用與預算停止皆為估算，實際以 Google 帳單為準。</p>
         </details>
-        <footer>版本 2.11.3 · 翻譯文字會自動保存在此瀏覽器，按「清除紀錄」即可刪除；原音片段與用量不保存。</footer>
+        <footer>版本 2.12.0 · 翻譯文字會自動保存在此瀏覽器，按「清除紀錄」即可刪除；原音片段與用量不保存。</footer>
       </div>
     </aside>
 
@@ -596,7 +596,7 @@ export default function App() {
         }}>
           {!captions.length && !(running && !manual) && <div className="empty"><span>聲</span><p>{face
             ? '按「開始對講」，把手機放在兩人中間，各自按住自己那一側的按鈕說話'
-            : manual ? running ? '對講機待命中：按住空白鍵或下方按鈕說話' : '先開始待命，再按住空白鍵或下方按鈕說話'
+            : manual ? running ? '對講機待命中：按住空白鍵或下方按鈕說話，或按一下開始' : '先開始待命，再按住（或按一下）空白鍵或下方按鈕說話'
               : '按開始翻譯，稍候顯示完整的原文與譯文'}</p><small>手機請保持此頁在前景。</small></div>}
           {paragraphs.map((item, index) => <Fragment key={item.id}>
             {(index === 0 || paragraphs[index - 1].sessionId !== item.sessionId || paragraphs[index - 1].direction !== item.direction) && <div className="session-divider">

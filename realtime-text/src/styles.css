@@ -188,6 +188,9 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); box-sha
 .talk-button { min-height: 52px; font-size: 16px; border-radius: 12px; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .talk-button.talk-speaking { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
 .talk-button.talk-tail { border-color: var(--busy); color: var(--busy); }
+/* 按一下後持續收音：沒有手指按著，用緩慢擴散的外框提醒麥克風還開著。 */
+.talk-button.talk-latched { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); animation: latched 1.8s ease-out infinite; }
+@keyframes latched { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
 .talk-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .export-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--line); }
 .export-actions button { min-height: 32px; padding: 3px 12px; font-size: 13px; font-weight: 400; }
@@ -262,7 +265,7 @@ footer { color: var(--faint); font-size: 12px; line-height: 1.6; padding: 0 4px 
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .revised, .pending-dot, .status-listening i, .face-status i.live { animation: none; }
+  .revised, .pending-dot, .status-listening i, .face-status i.live, .talk-button.talk-latched { animation: none; }
   .pending-bar i, button, .recognition-settings summary::after { transition: none; }
   .captions { scroll-behavior: auto; }
 }

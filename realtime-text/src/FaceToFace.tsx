@@ -43,7 +43,7 @@ function Side(props: Props & { language: Language; side: 'near' | 'far'; turns: 
       {lines.map(line => <p key={line.id} className={`face-line ${line.own ? 'own' : 'other'} ${line.final ? '' : 'draft'}`}>
         <small>{line.own ? text.own : text.other}{!line.final && !line.own ? ` · ${text.draft}` : ''}</small>{line.text}</p>)}
     </div>
-    <PushToTalkButton keyboard={false} className={`face-talk face-${state}`} label={text.button[state]}
+    <PushToTalkButton keyboard={false} className={`face-talk face-${state}`} label={text.button[state]} latchedLabel={text.latched}
       disabled={state !== 'idle' && state !== 'speaking'} state={speaker === language ? talkState : 'idle'}
       onPress={() => props.onPress(language)} onRelease={props.onRelease} />
     <span className="face-name">{text.name}</span>
@@ -57,7 +57,7 @@ export function FaceToFace(props: Props) {
     : props.finishing ? '正在收尾…'
     : !props.listening ? '正在準備麥克風與連線…'
       : busy && props.speaker ? `${FACE_TEXT[props.speaker].name} 說話中`
-        : props.talkState === 'finishing' ? '翻譯中…' : '可以開始對話：各自按住自己那一側的按鈕說話';
+        : props.talkState === 'finishing' ? '翻譯中…' : '可以開始對話：按住自己那一側的按鈕說話，或按一下開始、再按一下結束';
   // 對講畫面蓋住整頁時，底下的頁面不跟著捲動。
   useEffect(() => {
     const previous = document.body.style.overflow;

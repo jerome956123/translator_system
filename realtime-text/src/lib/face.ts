@@ -68,6 +68,8 @@ export function faceButtonState(listening: boolean, ended: boolean, talk: TalkSt
 interface FaceText {
   name: string;
   button: Record<FaceButtonState, string>;
+  /** 按一下之後持續收音時，按鈕上的文字。 */
+  latched: string;
   hint: string;
   own: string;
   other: string;
@@ -78,20 +80,23 @@ interface FaceText {
 export const FACE_TEXT: Record<Language, FaceText> = {
   zh: {
     name: '繁體中文',
-    button: { preparing: '準備中…', idle: '按住說話', speaking: '正在聽，放開結束', finishing: '翻譯中…', waiting: '對方說話中…', ended: '已結束' },
-    hint: '按住下方按鈕說話，放開後對方會看到翻譯。',
+    button: { preparing: '準備中…', idle: '按住說話，或按一下開始', speaking: '正在聽，放開結束', finishing: '翻譯中…', waiting: '對方說話中…', ended: '已結束' },
+    latched: '正在聽，再按一下結束',
+    hint: '按住下方按鈕說話，放開後對方會看到翻譯。也可以按一下開始，說完再按一下結束。',
     own: '你說', other: '對方', draft: '翻譯中',
   },
   ja: {
     name: '日本語',
-    button: { preparing: '準備中…', idle: '押しながら話す', speaking: '聞いています。離すと終了', finishing: '翻訳中…', waiting: '相手が話しています…', ended: '終了しました' },
-    hint: '下のボタンを押しながら話してください。離すと相手に翻訳が表示されます。',
+    button: { preparing: '準備中…', idle: '押しながら話す／タップで開始', speaking: '聞いています。離すと終了', finishing: '翻訳中…', waiting: '相手が話しています…', ended: '終了しました' },
+    latched: '聞いています。もう一度タップで終了',
+    hint: '下のボタンを押しながら話してください。離すと相手に翻訳が表示されます。一度タップして話し、もう一度タップして終了することもできます。',
     own: 'あなた', other: '相手', draft: '翻訳中',
   },
   en: {
     name: 'English',
-    button: { preparing: 'Getting ready…', idle: 'Hold to talk', speaking: 'Listening. Release to finish', finishing: 'Translating…', waiting: 'The other person is speaking…', ended: 'Ended' },
-    hint: 'Hold the button below and speak. Release to show the translation to the other person.',
+    button: { preparing: 'Getting ready…', idle: 'Hold to talk, or tap to start', speaking: 'Listening. Release to finish', finishing: 'Translating…', waiting: 'The other person is speaking…', ended: 'Ended' },
+    latched: 'Listening. Tap again to finish',
+    hint: 'Hold the button below and speak. Release to show the translation to the other person. You can also tap once to start and tap again to finish.',
     own: 'You', other: 'Them', draft: 'Translating',
   },
 };

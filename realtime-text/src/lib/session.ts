@@ -231,7 +231,7 @@ export class BrowserTranslationSession {
         this.sendAudio(chunk);
       }
       if (!this.stopping && !this.disposed) this.status('listening', this.ptt
-        ? '對講機已待命。按住空白鍵或「按住說話」按鈕開始，放開送出這句。'
+        ? '對講機已待命。按住說話、放開送出這句；或按一下開始、再按一下結束。'
         : this.settings.audioSource === 'display'
         ? '持續聆聽分享音訊中。停頓時也保持連線，按停止才結束。'
         : '持續聆聽中，可以說話。停頓時麥克風與 AI 連線仍保持開啟。');
