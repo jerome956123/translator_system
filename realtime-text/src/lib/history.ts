@@ -18,12 +18,14 @@ export function captionHistory(items: Caption[], action: Action): Caption[] {
       paragraphId: event.paragraphId ?? event.captionId, revision: event.revision,
       origin: event.origin, original: event.text, rawOriginal: event.rawText ?? event.text, translation: '', translationRevision: 0,
       originalFinal: event.final, translationFinal: false, corrected: false,
+      ...(event.speaker ? { speaker: event.speaker } : {}),
     }];
     if (existing.revision > event.revision) return items;
     return items.map(item => item.id === event.captionId ? { ...item, revision: event.revision,
       direction: event.direction ?? item.direction, rawOriginal: event.rawText ?? event.text,
       translation: event.direction && event.direction !== item.direction ? '' : item.translation,
-      original: event.text, originalFinal: event.final, translationFinal: false, corrected: false } : item);
+      original: event.text, originalFinal: event.final, translationFinal: false, corrected: false,
+      ...(event.speaker ? { speaker: event.speaker } : {}) } : item);
   }
   if (event.type === 'translation') return items.map(item => item.id === event.captionId
     && item.sessionId === event.sessionId && event.revision >= item.translationRevision
@@ -38,6 +40,7 @@ export function captionHistory(items: Caption[], action: Action): Caption[] {
     && item.sessionId === event.sessionId && item.revision === event.revision
     ? { ...item, original: event.original, translation: event.translation, corrected: event.corrected, direction: event.direction ?? item.direction,
       translationRevision: event.revision, originalFinal: event.final, translationFinal: event.final,
+      ...(event.speaker ? { speaker: event.speaker } : {}),
       // 即時模式：只有已定稿的句子被改寫才算校正，串流中的草稿更新不算。
       ...(item.translationFinal ? revised(item, event.translation) : {}) } : item);
   if (event.type === 'precision-gap') {

@@ -1,4 +1,4 @@
-import type { PrecisionSegment, PrecisionWindow, ServerMessage } from '../../shared/protocol';
+import type { Direction, PrecisionSegment, PrecisionWindow, ServerMessage, Speaker } from '../../shared/protocol';
 import { AudioCapture, pcmLevel } from '../audio/capture';
 import { RecentAudio } from '../audio/recent-audio';
 import type { SessionSettings } from './types';
@@ -13,6 +13,9 @@ interface Capture {
   start(onChunk: (chunk: ArrayBuffer) => void, onError?: (message: string) => void): Promise<void>;
   stop(flush?: boolean): Promise<void>;
 }
+
+/** 講者最近說的話：語言加上原文結尾的片段，給下一次請求當作接續標籤的線索。 */
+export const speakerNote = (direction: Direction, original: string) => `${direction.slice(0, 2)}: ${original.slice(-80)}`;
 
 /** The original-audio pass is the sole translator. No Live WebSocket or text SSE pipeline. */
 export class PrecisionTranslationSession {
@@ -33,11 +36,13 @@ export class PrecisionTranslationSession {
   private contextWindows = new Map<string, PrecisionWindow>();
   private initialContext: string;
   private initialRecent: [string, string][];
+  private initialSpeakerNotes: Partial<Record<Speaker, string>>;
 
   constructor(private settings: SessionSettings, private emit: (event: ServerMessage) => void,
     dependencies: { capture?: Capture; reviewAudio?: typeof reviewAudio } = {}) {
     this.initialContext = settings.context ?? '';
     this.initialRecent = settings.recent ?? [];
+    this.initialSpeakerNotes = settings.speakerNotes ?? {};
     const prices = pricesFor(settings.quality);
     this.usage = new UsageTracker(prices);
     this.capture = dependencies.capture ?? new AudioCapture(settings.audioSource);
@@ -76,8 +81,9 @@ export class PrecisionTranslationSession {
         }
         paragraphs.push(paragraphId);
         // Publish completed original and translation together in the main transcript history.
+        const speaker = segment.speaker ? { speaker: segment.speaker } : {};
         this.send({ type: 'transcript', sessionId: this.id, captionId, paragraphId,
-          origin: 'precision', direction: segment.direction, revision, text: segment.original,
+          origin: 'precision', direction: segment.direction, ...speaker, revision, text: segment.original,
           rawText: segment.original, final: true, receivedAt: Date.now() });
         this.send({ type: 'translation', sessionId: this.id, captionId, requestId: event.window.id,
           direction: segment.direction, revision, text: segment.translation, final: true });
@@ -86,8 +92,9 @@ export class PrecisionTranslationSession {
         const changed = Boolean(old) && (Boolean(old!.corrected[index]) || !before || before.original !== segment.original
           || before.translation !== segment.translation || before.direction !== segment.direction);
         corrected.push(changed);
+        // 只改了講者標籤不算文字校正，但標籤要跟著更新。
         if (old) this.send({ type: 'caption-correction', sessionId: this.id, captionId, revision,
-          direction: segment.direction, original: segment.original, translation: segment.translation,
+          direction: segment.direction, ...speaker, original: segment.original, translation: segment.translation,
           corrected: changed, final: true });
       });
       if (old && old.paragraphs.length > paragraphs.length) this.send({ type: 'remove-captions', sessionId: this.id,
@@ -101,6 +108,13 @@ export class PrecisionTranslationSession {
       // 帶著先前的譯文，讓人名、術語與語氣在整場對話中前後一致。
       this.settings.recent = recentPairs([...this.initialRecent, ...[...this.contextWindows.values()]
         .flatMap(window => window.segments.map(segment => [segment.original, segment.translation] as [string, string]))]);
+      // 記下每位講者最近說的話：下一段沒有前段聲音可比對（中間安靜或補翻）時，標籤仍接得上。
+      if (this.settings.speakers) {
+        const notes = { ...this.initialSpeakerNotes };
+        for (const window of this.contextWindows.values()) for (const segment of window.segments)
+          if (segment.speaker) notes[segment.speaker] = speakerNote(segment.direction, segment.original);
+        this.settings.speakerNotes = notes;
+      }
     } else this.send(event);
   }
 

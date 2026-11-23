@@ -75,6 +75,8 @@ export const audioSourcePreference = choice<AudioSource>('realtime-translator.au
 export const showOriginalPreference = flag('realtime-translator.show-original.v1', true);
 export const autoResumePreference = flag('realtime-translator.auto-resume.v1', true);
 export const autoSpeakPreference = flag('realtime-translator.auto-speak.v1', false);
+// 精準模式標示兩位講者（試作）：預設關閉，開啟後每次請求多要一個講者欄位。
+export const speakersPreference = flag('realtime-translator.speakers.v1', false);
 // 面對面對講：自己這一側的語言，以及對面那一半是否上下顛倒（auto 表示觸控裝置才顛倒）。
 export type FaceFlip = 'auto' | 'on' | 'off';
 const isLanguage = (value: unknown): value is Language => value === 'zh' || value === 'ja' || value === 'en';

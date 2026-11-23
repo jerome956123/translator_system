@@ -1,4 +1,4 @@
-import { isDirection } from '../../shared/protocol';
+import { isDirection, isSpeaker } from '../../shared/protocol';
 import type { Caption } from './types';
 
 // 翻譯紀錄（只有文字）自動保存在此瀏覽器，重新整理或分頁被系統回收後可還原。
@@ -23,6 +23,7 @@ function validCaption(value: unknown): value is Caption {
     && (item.previousTranslation === undefined || text(item.previousTranslation))
     && (item.revisedAt === undefined || count(item.revisedAt))
     && (item.corrected === undefined || typeof item.corrected === 'boolean')
+    && (item.speaker === undefined || isSpeaker(item.speaker))
     && (gap === undefined || (typeof gap === 'object' && gap !== null && count(gap.startSeconds) && count(gap.endSeconds) && text(gap.message)));
 }
 

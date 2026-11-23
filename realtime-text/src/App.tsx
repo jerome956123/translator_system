@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useMemo, useReducer, useRef, useState, type CSSProperties } from 'react';
-import { DIRECTIONS, LANGUAGE_PAIRS, type AudioSource, type Language, type LanguagePair, type TranslationMode, type TalkState, type ServerMessage } from '../shared/protocol';
+import { DIRECTIONS, LANGUAGE_PAIRS, type AudioSource, type Language, type LanguagePair, type Speaker, type TranslationMode, type TalkState, type ServerMessage } from '../shared/protocol';
 import { BrowserTranslationSession } from './lib/session';
-import { changedRange, exportParagraphs, gapText, groupCaptions, inlineText, joinSpeech, type CaptionParagraph } from './lib/paragraphs';
+import { changedRange, exportParagraphs, gapText, groupCaptions, inlineText, joinSpeech, speakerLabel, type CaptionParagraph } from './lib/paragraphs';
 import { loadApiKey, saveApiKey, loadVocabulary, saveVocabulary, loadExchangeRate, saveExchangeRate, loadTranslationMode, saveTranslationMode,
   loadScene, saveScene, loadJapaneseRegister, saveJapaneseRegister, pairPreference, qualityPreference, pacePreference, themePreference,
-  audioSourcePreference, showOriginalPreference, autoResumePreference, autoSpeakPreference, loadBudget, saveBudget,
+  audioSourcePreference, showOriginalPreference, autoResumePreference, autoSpeakPreference, speakersPreference, loadBudget, saveBudget,
   faceNearPreference, faceFlipPreference, faceSpeakPreference,
   loadFontScale, saveFontScale, clampFontScale, FONT_SCALE, type Theme } from './lib/preferences';
 import { cleanScene, JAPANESE_REGISTERS, parseTerms, recentPairs, SCENE_MAX_CHARS, type JapaneseRegister } from './lib/guidance';
@@ -18,7 +18,7 @@ import { sourceLang, targetLang } from './lib/chinese';
 import { defaultDirection, LANGUAGE_LABELS } from './lib/languages';
 import { EXCHANGE_RATE_DATE, EXCHANGE_RATE_SOURCE, formatTwd, twdBudgetToUsd, usdToTwd, validExchangeRate } from './lib/currency';
 import { recognitionText, exportComparison, audioTime } from './lib/diagnostics';
-import { PrecisionTranslationSession } from './lib/precision-session';
+import { PrecisionTranslationSession, speakerNote } from './lib/precision-session';
 import { PushToTalkButton } from './PushToTalkButton';
 import { FaceToFace } from './FaceToFace';
 import { faceLanguages } from './lib/face';
@@ -70,6 +70,7 @@ export default function App() {
   const [fontScale, setFontScale] = useState(() => loadFontScale());
   const [autoResume, setAutoResume] = useState(() => autoResumePreference.load());
   const [autoSpeak, setAutoSpeak] = useState(() => autoSpeakPreference.load());
+  const [speakers, setSpeakers] = useState(() => speakersPreference.load());
   const [faceNear, setFaceNear] = useState<Language>(() => faceNearPreference.load());
   const [faceFlip, setFaceFlip] = useState(() => faceFlipPreference.load());
   const [faceSpeak, setFaceSpeak] = useState(() => faceSpeakPreference.load());
@@ -222,8 +223,11 @@ export default function App() {
         .map(item => [item.original, item.translation] as [string, string])),
       context: earlier.slice(-4)
         .map(item => `${DIRECTIONS[item.direction].sourceLabel}: ${item.original}`).join('\n').slice(-512) };
+    // 講者標示（試作）只用在精準模式；接續先前紀錄時帶入每位講者最近說的話，標籤才接得上。
+    const speakerNotes: Partial<Record<Speaker, string>> = {};
+    if (speakers) for (const item of earlier) if (item.speaker) speakerNotes[item.speaker] = speakerNote(item.direction, item.original);
     const next = manual ? new BrowserTranslationSession({ ...settings, listeningMode: 'push-to-talk', precisionReview: false }, receive)
-      : new PrecisionTranslationSession(settings, receive);
+      : new PrecisionTranslationSession({ ...settings, ...(speakers ? { speakers: true, speakerNotes } : {}) }, receive);
     session.current = next;
     sessionPair.current = pair;
     dispatchUsage({ type: 'start-session', sessionId: next.id });
@@ -509,7 +513,7 @@ export default function App() {
             <p>以逗號或換行分隔，最多 100 詞。一般詞幫助辨識姓名與地名；寫成「原詞=譯法」會固定使用該譯法，兩個方向都適用。
               {terms.vocabulary.length > 0 && ` 目前：辨識提示 ${terms.vocabulary.length} 詞、固定譯法 ${terms.glossary.length} 組。`}</p>
           </details>
-          <details className="recognition-settings"><summary>品質與速度<em>{quality !== 'economy' || pace !== 'standard' || audioSource !== 'microphone' ? '已調整' : ''}</em></summary>
+          <details className="recognition-settings"><summary>品質與速度<em>{quality !== 'economy' || pace !== 'standard' || audioSource !== 'microphone' || speakers ? '已調整' : ''}</em></summary>
             <label>翻譯品質<select value={quality} disabled={running} onChange={event => {
               const next = event.target.value as Quality; setQuality(next); qualityPreference.save(next);
             }}>{Object.entries(QUALITY_MODELS).map(([value, item]) => <option value={value} key={value}>{item.label}</option>)}</select></label>
@@ -518,6 +522,10 @@ export default function App() {
               const next = event.target.value as Pace; setPace(next); pacePreference.save(next);
             }}>{Object.entries(PACES).map(([value, item]) => <option value={value} key={value}>{item.label}</option>)}</select></label>
             <p>快速會把聲音切成較短的段落，較早看到譯文；句子較容易被切開，要靠下一段的校對接回。</p>
+            <label className="switch"><input type="checkbox" checked={speakers} disabled={running} onChange={event => {
+              setSpeakers(event.target.checked); speakersPreference.save(event.target.checked);
+            }} />精準模式標示兩位講者（試作）</label>
+            <p>請 AI 依聲音把每段話標成「講者 A」或「講者 B」，換人說話就另起一段。只分辨兩個人；聲音相近、同時說話、很短的附和，或手機離其中一人太遠時可能標錯，標籤也可能在下一段校對時更正。不增加請求次數，費用幾乎不變。</p>
             <label>音訊來源（進階）<select value={audioSource} disabled={running} onChange={event => {
               const next = event.target.value as AudioSource; setAudioSource(next); audioSourcePreference.save(next);
             }}>
@@ -572,7 +580,7 @@ export default function App() {
           </div>
           <p className="precision-cost">{Boolean(usage.reviewRequests) && `總額已含原音翻譯 ${formatTwd(usdToTwd(usage.reviewEstimatedUsd ?? 0, displayRate))}。`}請求進行中先顯示保守估算，再依實際用量更新；失敗與重試也可能計費。費用與預算停止皆為估算，實際以 Google 帳單為準。</p>
         </details>
-        <footer>版本 2.12.0 · 翻譯文字會自動保存在此瀏覽器，按「清除紀錄」即可刪除；原音片段與用量不保存。</footer>
+        <footer>版本 2.13.0 · 翻譯文字會自動保存在此瀏覽器，按「清除紀錄」即可刪除；原音片段與用量不保存。</footer>
       </div>
     </aside>
 
@@ -603,7 +611,8 @@ export default function App() {
               <strong>{DIRECTIONS[item.direction].sourceLabel} → {DIRECTIONS[item.direction].targetLabel}</strong>
               <time>{new Date(item.receivedAt).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false })}</time></div>}
             {item.gap ? <div className="gap-notice" role="note"><strong>未翻譯</strong><span>{gapText(item.gap)}</span></div>
-            : <article className="caption">
+            : <article className={`caption ${item.speaker ? `speaker-${item.speaker.toLowerCase()}` : ''}`}>
+            {item.speaker && <span className="speaker-chip">{speakerLabel(item.speaker)}</span>}
             {showComparison && <div className="comparison-grid">
               <div><small>語音辨識稿 · 文字校正前</small><p lang={sourceLang(item.direction)}><FlowingCaption captions={item.captions} field="recognition" /></p></div>
               <div><small>目前原文 · 含可能的校正</small><p lang={sourceLang(item.direction)}><FlowingCaption captions={item.captions} field="original" /></p></div>

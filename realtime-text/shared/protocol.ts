@@ -21,10 +21,15 @@ export type ListeningMode = 'automatic' | 'push-to-talk';
 export type TranslationMode = 'precision' | 'push-to-talk' | 'face-to-face';
 export type TalkState = 'idle' | 'speaking' | 'tail' | 'finishing' | 'closed';
 
+/** 精準模式的講者標示（試作）：最多分辨兩個人的聲音。 */
+export type Speaker = 'A' | 'B';
+export const isSpeaker = (value: unknown): value is Speaker => value === 'A' || value === 'B';
+
 export interface PrecisionSegment {
   direction: Direction;
   original: string;
   translation: string;
+  speaker?: Speaker;
 }
 export interface PrecisionWindow {
   id: string;
@@ -60,9 +65,9 @@ export type ServerMessage =
   | { type: 'precision-gap'; sessionId: string; gapId: string; startSeconds: number; endSeconds: number; message: string; receivedAt: number }
   | { type: 'status'; sessionId: string; status: 'connecting' | 'ready' | 'listening' | 'finishing' | 'stopped'; message?: string }
   | { type: 'audio-level'; sessionId: string; level: number }
-  | { type: 'transcript'; sessionId: string; captionId: string; paragraphId?: string; direction?: Direction; origin?: 'precision' | 'live'; rawText?: string; revision: number; text: string; final: boolean; receivedAt: number }
+  | { type: 'transcript'; sessionId: string; captionId: string; paragraphId?: string; direction?: Direction; origin?: 'precision' | 'live'; speaker?: Speaker; rawText?: string; revision: number; text: string; final: boolean; receivedAt: number }
   | { type: 'translation'; sessionId: string; captionId: string; revision: number; requestId: string; direction?: Direction; text: string; final: boolean; firstTokenAt?: number }
-  | { type: 'caption-correction'; sessionId: string; captionId: string; revision: number; direction?: Direction; original: string; translation: string; final: boolean; corrected: boolean }
+  | { type: 'caption-correction'; sessionId: string; captionId: string; revision: number; direction?: Direction; speaker?: Speaker; original: string; translation: string; final: boolean; corrected: boolean }
   | { type: 'usage'; sessionId: string; usage: UsageSnapshot }
   | { type: 'remove-captions'; sessionId: string; captionIds: string[] }
   | { type: 'warning'; sessionId: string; message: string }

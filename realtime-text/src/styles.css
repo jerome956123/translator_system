@@ -156,6 +156,11 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); box-sha
 
 .caption { margin: 0 0 12px; padding: 14px 16px; border-radius: 12px; background: var(--card); }
 .caption > * + * { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+/* 講者標示（試作）：兩位講者各用一種低彩度的顏色，卡片左緣與標籤同色。 */
+.caption.speaker-a { --speaker: var(--accent); border-left: 3px solid var(--speaker); }
+.caption.speaker-b { --speaker: var(--busy); border-left: 3px solid var(--speaker); }
+.speaker-chip { display: inline-block; padding: 1px 9px; border: 1px solid var(--speaker); border-radius: 999px; color: var(--speaker); font-size: 12px; font-weight: 600; letter-spacing: .04em; }
+.caption > .speaker-chip + * { margin-top: 8px; padding-top: 0; border-top: 0; }
 /* 中日文不在標點前後留下孤字；支援的瀏覽器會依日文文節斷行。 */
 .caption p { margin: 0; line-height: 1.8; overflow-wrap: break-word; word-break: normal; white-space: normal; line-break: strict; text-wrap: pretty; }
 .caption [lang="ja"], .face [lang="ja"] { font-family: "Yu Gothic", "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; word-break: auto-phrase; }

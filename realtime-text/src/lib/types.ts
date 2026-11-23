@@ -1,4 +1,4 @@
-import type { AudioSource, Direction, Language, LanguagePair, ListeningMode, Mode } from '../../shared/protocol';
+import type { AudioSource, Direction, Language, LanguagePair, ListeningMode, Mode, Speaker } from '../../shared/protocol';
 import type { TranslationGuidance } from './guidance';
 import type { Pace, Quality } from './config';
 
@@ -65,6 +65,10 @@ export interface SessionSettings {
   /** 先前的 [原文, 譯文]，讓人名、術語與語氣前後一致。 */
   recent?: [string, string][];
   context?: string;
+  /** 精準模式標示兩位講者（試作）。 */
+  speakers?: boolean;
+  /** 每位講者最近一次說的話（語言與原文片段）；沒有前段原音可比對聲音時，讓標籤接得上。 */
+  speakerNotes?: Partial<Record<Speaker, string>>;
   precisionReview?: boolean;
   listeningMode?: ListeningMode;
 }
@@ -78,6 +82,8 @@ export interface Caption {
   /** 已顯示過的譯文被後續校對改寫時，保留改寫前的版本供畫面標示差異。 */
   previousTranslation?: string;
   revisedAt?: number;
+  /** 精準模式標示的講者（試作）；沒有開啟或無法判斷時不帶。 */
+  speaker?: Speaker;
   id: string;
   sessionId: string;
   direction: Direction;
