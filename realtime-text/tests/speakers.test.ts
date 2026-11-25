@@ -4,7 +4,7 @@ import { RecentAudio } from '../src/audio/recent-audio';
 import { PrecisionTranslationSession, speakerNote } from '../src/lib/precision-session';
 import type { PrecisionSegment, ServerMessage } from '../shared/protocol';
 import { captionHistory } from '../src/lib/history';
-import { exportParagraphs, groupCaptions } from '../src/lib/paragraphs';
+import { exportParagraphs, groupCaptions, SPEAKER_TURN_MAX_CHARS } from '../src/lib/paragraphs';
 import { loadCaptions, saveCaptions } from '../src/lib/history-store';
 import { speakersPreference } from '../src/lib/preferences';
 import type { Caption } from '../src/lib/types';
@@ -47,6 +47,7 @@ describe('精準模式的講者標示（試作）：請求內容', () => {
     expect(items.required[0]).toBe('speaker'); expect(items.propertyOrdering[0]).toBe('speaker');
     const prompt = body.contents[0].parts[0].text as string;
     expect(prompt).toContain('SPEAKERS'); expect(prompt).toContain('never by language');
+    expect(prompt).toContain('continues across the interval boundary keeps the speaker');
     expect(prompt).toContain('the first voice you hear is "A"');
     expect(segments[0]).toMatchObject({ speaker: 'B', direction: 'ja-zh', translation: '初次見面。' });
   });
@@ -149,6 +150,47 @@ describe('精準模式的講者標示（試作）：顯示、匯出與保存', (
     const paragraphs = groupCaptions([caption('w-0', 'A', '明日は', '明天'), caption('w-1', 'A', '晴れです。', '是晴天。'),
       caption('w-2', 'B', 'よかった。', '太好了。'), caption('x-0', 'A', '出かけましょう。', '出門吧。')]);
     expect(paragraphs.map(item => [item.speaker, item.original])).toEqual([['A', '明日は晴れです。'], ['B', 'よかった。'], ['A', '出かけましょう。']]);
+  });
+
+  const turn = (id: string, speaker: Caption['speaker'], paragraphId: string, original: string, extra: Partial<Caption> = {}): Caption =>
+    ({ ...caption(id, speaker, original, `譯：${original}`), paragraphId, ...extra });
+
+  it('同一位講者的話即使被切成不同段落、不同批次送出，也接在同一格；換人才換格', () => {
+    const paragraphs = groupCaptions([
+      turn('w1-0', 'A', 'p1', 'Three, being afraid of making mistakes. Four,'),
+      turn('w2-0', 'A', 'p2', 'not surrounding yourself with enough English.'),
+      turn('w2-1', 'A', 'p2', "If you're making any of these mistakes, don't worry."),
+      turn('w3-0', 'B', 'p3', 'Exactly.'),
+      turn('w3-1', 'A', 'p3', "Let's start."),
+    ]);
+    expect(paragraphs.map(item => [item.speaker, item.captions.length])).toEqual([['A', 3], ['B', 1], ['A', 1]]);
+    expect(paragraphs[0].original).toBe("Three, being afraid of making mistakes. Four, not surrounding yourself with enough English. If you're making any of these mistakes, don't worry.");
+    expect(exportParagraphs(paragraphs, false).split('〔講者').length - 1).toBe(3);
+  });
+
+  it('同一位講者換了語言、換了場次，或中間有未翻譯的缺口時仍另起一格', () => {
+    const paragraphs = groupCaptions([
+      turn('w1-0', 'A', 'p1', 'こんにちは。'),
+      turn('w2-0', 'A', 'p2', '你好。', { direction: 'zh-ja' }),
+      turn('w3-0', 'A', 'p3', '謝謝。', { direction: 'zh-ja', sessionId: 'next' }),
+      turn('g-1', undefined, 'g-1', '', { direction: 'zh-ja', sessionId: 'next', gap: { startSeconds: 0, endSeconds: 5, message: '逾時' } }),
+      turn('w4-0', 'A', 'p4', '再見。', { direction: 'zh-ja', sessionId: 'next' }),
+    ]);
+    expect(paragraphs.map(item => item.captions.map(entry => entry.id))).toEqual([['w1-0'], ['w2-0'], ['w3-0'], ['g-1'], ['w4-0']]);
+  });
+
+  it('同一個人講很久時，一格超過長度上限後在下一個段落分界另起一格，同一段落內不切開', () => {
+    const long = 'あ'.repeat(SPEAKER_TURN_MAX_CHARS);
+    const paragraphs = groupCaptions([
+      turn('w1-0', 'A', 'p1', long), turn('w1-1', 'A', 'p1', '同じ段落です。'),
+      turn('w2-0', 'A', 'p2', '次の段落です。'), turn('w2-1', 'A', 'p2', '続きです。'),
+    ]);
+    expect(paragraphs.map(item => item.captions.map(entry => entry.id))).toEqual([['w1-0', 'w1-1'], ['w2-0', 'w2-1']]);
+  });
+
+  it('沒有講者標示的紀錄照原本的方式分段，不會因此被合併', () => {
+    const plain = groupCaptions([turn('w1-0', undefined, 'p1', '一。'), turn('w2-0', undefined, 'p2', '二。')]);
+    expect(plain).toHaveLength(2);
   });
 
   it('沒有講者標示的紀錄照原本的方式分段', () => {

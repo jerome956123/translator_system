@@ -43,12 +43,19 @@ export function changedRange(before: string, after: string): { start: number; en
   return { start, end: after.length - tail };
 }
 
+// 同一位講者連續說的話合併在同一格；單一格的原文超過這個長度後，才在下一個段落分界另起一格，避免一個人講很久時變成一大塊。
+export const SPEAKER_TURN_MAX_CHARS = 600;
+
 export function groupCaptions(captions: Caption[]): CaptionParagraph[] {
   const paragraphs: CaptionParagraph[] = [];
   for (const caption of captions) {
     let paragraph = paragraphs.at(-1);
-    // 換了講者就另起一段，即使語言相同、仍在同一個段落編號內。
-    if (!paragraph || paragraph.captions.at(-1)?.paragraphId !== caption.paragraphId || paragraph.direction !== caption.direction
+    const sameParagraph = paragraph?.captions.at(-1)?.paragraphId === caption.paragraphId;
+    // 有講者標示時以「誰在說」分格：同一位講者、同一個方向、同一場次的連續內容接在一起，不管它被切成幾段送出。
+    const sameTurn = Boolean(paragraph && caption.speaker && paragraph.speaker === caption.speaker && !caption.gap && !paragraph.gap
+      && paragraph.sessionId === caption.sessionId && paragraph.original.length < SPEAKER_TURN_MAX_CHARS);
+    // 換了講者就另起一格，即使語言相同、仍在同一個段落編號內。
+    if (!paragraph || !(sameParagraph || sameTurn) || paragraph.direction !== caption.direction
       || paragraph.speaker !== caption.speaker) {
       paragraph = { id: `${caption.paragraphId}-${caption.id}`, captions: [], original: '', translation: '', originalFinal: true, translationFinal: true,
         sessionId: caption.sessionId, direction: caption.direction, receivedAt: caption.receivedAt, corrected: false,
